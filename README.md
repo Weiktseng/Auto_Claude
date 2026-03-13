@@ -1,30 +1,62 @@
-# Auto_Claude 共用權限設定
+# Auto_Claude
 
-Claude Code 的 `settings.local.json` 共用維護檔。
+Claude Code `settings.local.json` 團隊共用設定。
 
-## 用途
+## 為什麼需要自動化
 
-蒐集所有未知又安全的指令允許命令，統一團隊的 Claude Code 自動化權限，讓瑣碎命令（版本檢查、檔案操作等）不再跳確認，同時封鎖危險操作。
+蒐集所有未知又安全的指令允許命令，統一團隊的 Claude Code 自動化權限，讓瑣碎命令不再跳確認，同時封鎖危險操作。實測一個 session 可觸發 **150+ 次授權提示**，累積接近 **1 小時的等待時間**。
 
-## 使用方式
+## 安裝
 
 ```bash
-# 複製到你的 Claude 設定目錄
-cp settings.local.json ~/.claude/settings.local.json
+git clone git@github.com:Weiktseng/Auto_Claude.git
+cp Auto_Claude/settings.local.json ~/.claude/settings.local.json
 ```
 
-> **重要：** 複製完成後必須**重新開啟 Claude Code session** 才會生效。
+重新開啟 Claude Code session 即生效。
 
-## 注意事項
+## 設定結構
 
-- 此設定控制的是 Claude Code 的工具權限（allow/deny 清單）
-- 部分安全提示是 Claude Code 內建的（如 brace expansion `{}`、compound `cd && git` 命令），**無法透過此設定關閉**，屬正常行為，選 Yes 即可
+### allow（自動允許）
 
-## 結構
+| 類別 | 涵蓋範圍 |
+|------|---------|
+| `Bash(*)` | 基礎萬用匹配 |
+| `Bash(python3 *\|*)` 等 | 管道、鏈式命令（`Bash(*)` 不一定覆蓋） |
+| `Bash(curl *)`, `Bash(wget *)` | 下載資料 |
+| `Bash(git *)`, `Bash(git *\|*)` | 版本控制 |
+| `Bash(uvicorn *)` | 開發伺服器 |
+| `Read`, `Write`, `Edit`, `Glob`, `Grep` | 檔案操作工具 |
+| `WebSearch`, `WebFetch` | 網路查詢 |
+| `NotebookEdit` | Jupyter notebook |
 
-- **allow**: 已開放自動執行的工具與命令
-- **deny**: 封鎖的危險命令（刪除根目錄、force push 等）
+### deny（封鎖）
+
+每條 deny 規則都有明確的不可逆破壞理由：
+
+| 規則 | 原因 |
+|------|------|
+| `Bash(rm -rf /)`, `rm -rf /*` | 刪除整台電腦 |
+| `Bash(rm -rf ~)`, `rm -rf ~/*` | 刪除整個家目錄 |
+| `Bash(sudo *)` | 提權操作，風險不可控 |
+| `Bash(git push --force *)` | 覆蓋遠端歷史，團隊其他人的工作會丟失 |
+| `Bash(git push * --force *)` | 同上（flag 位置不同的變體） |
+| `Bash(git reset --hard *)` | 丟棄所有未提交變更，無法復原 |
+
+> deny 規則只加不可逆的破壞性操作。`rm -rf node_modules` 這類正常開發操作不在封鎖範圍。新增 deny 規則必須附上具體的破壞場景說明。
+
+## 已知限制
+
+以下安全提示是 Claude Code **內建的**，無法透過設定關閉：
+
+- **Brace expansion** `{}` — 如 `mkdir -p dir/{a,b,c}`，改寫成 `mkdir -p dir/a dir/b dir/c` 可避開
+- **部分 compound 命令** — 即使有 `Bash(*)` 仍可能觸發，需在 allow 中明確列出模式（如 `Bash(cd *&&*)`）
+
+## 專案級設定
+
+此檔案是全域設定（`~/.claude/settings.local.json`）。各專案可在自己的 `.claude/settings.local.json` 中追加針對該專案的 allow 規則，補充全域設定覆蓋不到的模式。
 
 ## 貢獻
 
-歡迎 PR 新增 deny 規則或調整 allow 範圍，請附上原因說明。
+- 新增 allow：直接 PR，說明哪個命令模式會觸發不必要的授權
+- 新增 deny：必須附上**具體的不可逆破壞場景**，否則不合併
