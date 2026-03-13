@@ -56,7 +56,78 @@ cp Auto_Claude/settings.local.json ~/.claude/settings.local.json
 
 此檔案是全域設定（`~/.claude/settings.local.json`）。各專案可在自己的 `.claude/settings.local.json` 中追加針對該專案的 allow 規則，補充全域設定覆蓋不到的模式。
 
-## 貢獻
+## 貢獻規則
 
-- 新增 allow：直接 PR，說明哪個命令模式會觸發不必要的授權
-- 新增 deny：必須附上**具體的不可逆破壞場景**，否則不合併
+### allow：只增不刪
+
+- **新增**：直接 PR，說明哪個命令模式會觸發不必要的授權提示
+- **刪除**：必須有**非常嚴重的安全問題**才能移除現有 allow 規則，並附上具體的攻擊場景說明
+
+### deny：必須附上破壞場景
+
+- 新增 deny 必須附上**具體的不可逆破壞場景**，否則不合併
+- `rm -rf node_modules` 這類正常開發操作不在封鎖範圍
+
+### 不要相信 `Bash(*)` 能解決一切
+
+`Bash(*)` 看起來是萬用匹配，但實測中它**無法覆蓋所有情況**。以下是真實的踩坑紀錄：
+
+## 實戰案例：為什麼需要明確列出每個模式
+
+以下案例來自一個真實的 Claude Code session，即使已經設定 `Bash(*)` 仍然觸發了授權提示：
+
+### 案例 1：Brace expansion 觸發確認
+
+```
+Bash command
+  mkdir -p data/{exam_questions,laws,materials,stations,news,highway,tdx,statistics}
+  Create data subdirectories for all sources
+
+Command contains brace expansion that could alter command parsing
+
+Do you want to proceed?
+❯ 1. Yes
+  2. No
+```
+
+**原因：** Claude Code 內建安全檢查，偵測到 `{}` brace expansion 就會攔截，與 settings 無關。
+**解法：** 改寫成展開形式 `mkdir -p data/exam_questions data/laws data/materials ...`
+
+### 案例 2：Compound commands with cd + git
+
+```
+Bash command
+  cd /path/to/repo && git init && git remote add origin ... && git add . && git status
+  Init repo, add remote, stage files
+
+Compound commands with cd and git require approval to prevent bare repository attacks
+
+Do you want to proceed?
+❯ 1. Yes
+  2. No
+```
+
+**原因：** Claude Code 內建防護，`cd` + `git` 的組合命令會觸發 bare repository attack 的安全檢查。
+**解法：** 在 allow 中明確加入 `Bash(cd *&&*)` 可減少部分觸發，但此類內建檢查無法完全關閉。
+
+### 案例 3：cp 檔案觸發專案存取確認
+
+```
+Bash command
+  cp source.csv data/faq_raw.csv && wc -l data/faq_raw.csv
+  Copy FAQ CSV to data directory
+
+Do you want to proceed?
+❯ 1. Yes
+  2. Yes, and always allow access to AI交通部客服/ from this project
+  3. No
+```
+
+**原因：** 這是**專案目錄存取權限**的確認，不是命令類型的問題。首次存取某個專案路徑時會觸發。
+**解法：** 選 "Yes, and always allow access" 後該專案路徑就不會再問。這個也無法透過 settings 預先設定。
+
+### 案例 4：Claude 自己也會觸發
+
+即使是 Claude Code 自己生成的命令，也會被自己的內建安全檢查攔截。這不是 bug，是 feature。
+
+> **結論：** `Bash(*)` 只是基礎，必須搭配明確的模式匹配（如 `Bash(cd *&&*)`、`Bash(git *|*)`）才能最大程度減少不必要的提示。但部分內建安全檢查（brace expansion、bare repo 防護）是無法關閉的。
