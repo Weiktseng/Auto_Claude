@@ -12,7 +12,18 @@ Claude Code `settings.local.json` 團隊共用設定。
 
 ```bash
 git clone git@github.com:Weiktseng/Auto_Claude.git
-cp Auto_Claude/settings.local.json ~/.claude/settings.local.json
+```
+
+### 套用到特定專案
+
+```bash
+./Auto_Claude/setup.sh /path/to/your/project
+```
+
+### 套用到全域
+
+```bash
+./Auto_Claude/setup.sh
 ```
 
 重新開啟 Claude Code session 即生效。
