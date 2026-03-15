@@ -16,15 +16,21 @@ git clone git@github.com:Weiktseng/Auto_Claude.git
 
 ### 方法 1：直接跟 Claude 說（推薦）
 
-在 Claude Code 對話中直接說：
+在任何 Claude Code session 中，根據你的需求選擇說法：
 
-> 「幫我把 Auto_Claude 的設定套用到這個專案」
+**全新專案（直接套用）：**
+
+> 「從 https://raw.githubusercontent.com/Weiktseng/Auto_Claude/main/settings.local.json 拿設定，複製到這個專案的 `.claude/settings.local.json`」
 >
 > 「幫我在這個工作目錄開全自動」
->
-> 「把 https://github.com/Weiktseng/Auto_Claude 的 settings.local.json 複製到這個專案的 .claude/ 下」
 
-Claude 會自動幫你完成複製和設定。
+**已有設定的專案（合併，不覆蓋）：**
+
+> 「從 https://raw.githubusercontent.com/Weiktseng/Auto_Claude/main/settings.local.json 拿設定，把 allow 和 deny 規則**合併**到這個專案的 `.claude/settings.local.json`，保留現有的規則，不要覆蓋」
+
+Claude 會自動 WebFetch 抓取、讀取現有設定、合併去重、寫回。
+
+**不需要事先 clone repo，任何 session 都能直接用。**
 
 ### 方法 2：用 setup script
 
