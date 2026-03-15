@@ -23,14 +23,22 @@ cp Auto_Claude/settings.local.json ~/.claude/settings.local.json
 
 | 類別 | 涵蓋範圍 |
 |------|---------|
-| `Bash(*)` | 基礎萬用匹配 |
-| `Bash(python3 *\|*)` 等 | 管道、鏈式命令（`Bash(*)` 不一定覆蓋） |
-| `Bash(curl *)`, `Bash(wget *)` | 下載資料 |
-| `Bash(git *)`, `Bash(git *\|*)` | 版本控制 |
-| `Bash(uvicorn *)` | 開發伺服器 |
-| `Read`, `Write`, `Edit`, `Glob`, `Grep` | 檔案操作工具 |
-| `WebSearch`, `WebFetch` | 網路查詢 |
-| `NotebookEdit` | Jupyter notebook |
+| `Bash(*)` | 基礎萬用匹配（不夠，見下方說明） |
+| Python | `python3 *`, `pip3 *`, `pip *` 及其 `\|` `&&` 變體 |
+| Node.js | `node *`, `npm *`, `npx *` 及其 `\|` `&&` 變體 |
+| Git / GitHub | `git *`, `gh *` 及其 `\|` `&&` 變體 |
+| 檔案操作 | `ls`, `cat`, `cp`, `mv`, `mkdir`, `touch`, `chmod`, `head`, `tail`, `wc`, `sort`, `diff`, `find`, `du`, `df` |
+| 文字處理 | `echo`, `grep`, `sed`, `awk`, `xargs`, `tee` |
+| 壓縮/下載 | `unzip`, `tar`, `curl`, `wget` |
+| 資料庫 | `sqlite3 *` |
+| 遠端 | `ssh *`, `scp *` |
+| 環境 | `env *`, `export *`, `source *`, `. *` |
+| 套件管理 | `brew *`, `pip install *` |
+| 開發伺服器 | `uvicorn *`, `pytest *` |
+| Shell 導航 | `cd *`, `cd *&&*`, `cd *;*` |
+| Claude 工具 | `Read`, `Write`, `Edit`, `Glob`, `Grep` |
+| 網路查詢 | `WebSearch`, `WebFetch` |
+| Notebook | `NotebookEdit` |
 
 ### deny（封鎖）
 
