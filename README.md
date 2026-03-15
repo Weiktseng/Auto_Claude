@@ -14,19 +14,36 @@ Claude Code `settings.local.json` 團隊共用設定。
 git clone git@github.com:Weiktseng/Auto_Claude.git
 ```
 
-### 套用到特定專案
+### 方法 1：直接跟 Claude 說（推薦）
+
+在 Claude Code 對話中直接說：
+
+> 「幫我把 Auto_Claude 的設定套用到這個專案」
+>
+> 「幫我在這個工作目錄開全自動」
+>
+> 「把 https://github.com/Weiktseng/Auto_Claude 的 settings.local.json 複製到這個專案的 .claude/ 下」
+
+Claude 會自動幫你完成複製和設定。
+
+### 方法 2：用 setup script
 
 ```bash
+# 套用到特定專案
 ./Auto_Claude/setup.sh /path/to/your/project
-```
 
-### 套用到全域
-
-```bash
+# 套用到全域
 ./Auto_Claude/setup.sh
 ```
 
-重新開啟 Claude Code session 即生效。
+### 方法 3：手動複製
+
+```bash
+mkdir -p your-project/.claude
+cp Auto_Claude/settings.local.json your-project/.claude/settings.local.json
+```
+
+> **重要：** 不管哪種方法，都需要**重新開啟 Claude Code session** 才會生效。
 
 ## 設定結構
 
