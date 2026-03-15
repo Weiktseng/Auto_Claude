@@ -20,17 +20,22 @@ git clone git@github.com:Weiktseng/Auto_Claude.git
 
 **全新專案（直接套用）：**
 
-> 「從 https://raw.githubusercontent.com/Weiktseng/Auto_Claude/main/settings.local.json 拿設定，複製到這個專案的 `.claude/settings.local.json`」
+> 「從 https://raw.githubusercontent.com/Weiktseng/Auto_Claude/main/settings.local.json 拿設定，複製到這個專案的 `.claude/settings.local.json`，完成後提醒我要重開 session」
 >
-> 「幫我在這個工作目錄開全自動」
+> 「幫我在這個工作目錄開全自動，完成後提醒我重開 session」
 
 **已有設定的專案（合併，不覆蓋）：**
 
-> 「從 https://raw.githubusercontent.com/Weiktseng/Auto_Claude/main/settings.local.json 拿設定，把 allow 和 deny 規則**合併**到這個專案的 `.claude/settings.local.json`，保留現有的規則，不要覆蓋」
+> 「從 https://raw.githubusercontent.com/Weiktseng/Auto_Claude/main/settings.local.json 拿設定，把 allow 和 deny 規則**合併**到這個專案的 `.claude/settings.local.json`，保留現有的規則，不要覆蓋，完成後提醒我重開 session」
 
 Claude 會自動 WebFetch 抓取、讀取現有設定、合併去重、寫回。
 
 **不需要事先 clone repo，任何 session 都能直接用。**
+
+> ⚠️ **設定完成後必須重開 Claude Code session 才會生效！**
+>
+> 在終端按 `Ctrl+C` 結束當前 session，然後重新執行 `claude` 即可。
+> 設定是在啟動時載入的，修改後不會即時生效，這點無法自動化。
 
 ### 方法 2：用 setup script
 
