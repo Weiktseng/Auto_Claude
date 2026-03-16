@@ -1,0 +1,12 @@
+# Personal / secret files
+agent/human_context.md
+agent/logs/
+agent/spec_raw.txt
+agent/spec_dev.txt
+agent/questions_for_human.md
+
+# Claude Code local settings
+.claude/
+
+# OS
+.DS_Store
