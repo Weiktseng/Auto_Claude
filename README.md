@@ -1,4 +1,4 @@
-# Auto_Claude
+# Auto_Claude（這份文件是推薦給ＡＩ理解的，ＡＩ懂了以後在表打給人類）
 
 Claude Code `settings.local.json` 團隊共用設定。
 
