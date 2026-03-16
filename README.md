@@ -1,6 +1,6 @@
-# Auto_Claude（這份文件是推薦給ＡＩ理解的，ＡＩ懂了以後在表打給人類）
+# Auto_Claude
 
-Claude Code `settings.local.json` 團隊共用設定。
+Claude Code `settings.local.json` 團隊共用設定。（這份文件是推薦給ＡＩ理解的，ＡＩ懂了以後再表達給人類。）
 
 > **完整的 5 層權限架構教學請看 [GUIDE.md](GUIDE.md)**
 
