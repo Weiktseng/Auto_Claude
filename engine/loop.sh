@@ -32,6 +32,9 @@ MODEL_DEV="opus"
 PROJECT_DIR=""
 SPEC_PATH=""
 PROMPT_TEMPLATE=""
+CONTEXT_PATH=""
+COMMS_DIR=""
+LOG_DIR_OVERRIDE=""
 MAX_ROUNDS=10
 DEV_SESSION_ID=""
 INITIAL_PROMPT=""
@@ -42,7 +45,10 @@ while [[ $# -gt 0 ]]; do
         --project-dir)      PROJECT_DIR="$2";       shift 2 ;;
         --spec)             SPEC_PATH="$2";          shift 2 ;;
         --prompt-template)  PROMPT_TEMPLATE="$2";    shift 2 ;;
-        --model-reviewer)      MODEL_REVIEWER="$2";        shift 2 ;;
+        --context)          CONTEXT_PATH="$2";       shift 2 ;;
+        --comms-dir)        COMMS_DIR="$2";          shift 2 ;;
+        --log-dir)          LOG_DIR_OVERRIDE="$2";   shift 2 ;;
+        --model-reviewer)   MODEL_REVIEWER="$2";     shift 2 ;;
         --model-dev)        MODEL_DEV="$2";          shift 2 ;;
         --max-rounds)       MAX_ROUNDS="$2";         shift 2 ;;
         --resume-session)   DEV_SESSION_ID="$2";     shift 2 ;;
@@ -66,13 +72,15 @@ if [[ -z "$SPEC_PATH" ]]; then
     echo "Error: --spec is required" >&2; exit 1
 fi
 
-# Defaults
+# Defaults — 向後相容，沒給新參數就用舊路徑
 PROMPT_TEMPLATE="${PROMPT_TEMPLATE:-$SCRIPT_DIR/prompts/motc_reviewer.prompt.md}"
+CONTEXT_PATH="${CONTEXT_PATH:-$SCRIPT_DIR/human_context.md}"
+COMMS_DIR="${COMMS_DIR:-$PROJECT_DIR}"
 TEMPLATE_PROMPT=$(cat "$PROMPT_TEMPLATE")
 SPEC_CONTENT=$(cat "$SPEC_PATH")
 
 # ── Log setup ──
-LOG_DIR="$SCRIPT_DIR/logs"
+LOG_DIR="${LOG_DIR_OVERRIDE:-$SCRIPT_DIR/logs}"
 mkdir -p "$LOG_DIR"
 TIMESTAMP=$(date +"%Y-%m-%d_%H%M%S")_$$
 LOOP_LOG="$LOG_DIR/${TIMESTAMP}_loop.md"
@@ -90,12 +98,71 @@ cat > "$LOOP_LOG" <<EOF
 
 EOF
 
+# ── Session index CSV (maps rounds → .jsonl session files) ──
+SESSION_CSV="$LOG_DIR/${TIMESTAMP}_sessions.csv"
+echo "round,role,session_uuid,project_folder,timestamp" > "$SESSION_CSV"
+
+# Helper: capture the session UUID created by a --print call
+# Usage: touch "$ref_file" BEFORE the call, then call this AFTER
+_session_ref=$(mktemp /tmp/session_ref_XXXXXX)
+
+capture_session() {
+    local role="$1"
+    local round_num="$2"
+    local newest
+    newest=$(find ~/.claude/projects -name "*.jsonl" -newer "$_session_ref" -type f 2>/dev/null | head -1)
+    if [[ -n "$newest" ]]; then
+        local uuid
+        uuid=$(basename "$newest" .jsonl)
+        local folder
+        folder=$(basename "$(dirname "$newest")")
+        echo "$round_num,$role,$uuid,$folder,$(date +%Y-%m-%dT%H:%M:%S)" >> "$SESSION_CSV"
+    fi
+    touch "$_session_ref"  # reset for next call
+}
+
 echo "🔄 Auto_Claude Dev ↔ Reviewer Loop"
 echo "   Reviewer: $MODEL_REVIEWER | Dev: $MODEL_DEV"
 echo "   Project: $PROJECT_DIR"
 echo "   Max rounds: $MAX_ROUNDS"
 echo "   Log: $LOOP_LOG"
 echo ""
+
+# ── Dev server management (auto-reload mode) ──
+DEV_SERVER_PID=""
+DEV_SERVER_PORT=$(grep "^PORT" "$PROJECT_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d ' "' || echo "8001")
+DEV_SERVER_PORT=${DEV_SERVER_PORT:-8001}
+
+start_dev_server() {
+    # Kill anything on the port
+    local old_pids
+    old_pids=$(lsof -ti:"$DEV_SERVER_PORT" 2>/dev/null || true)
+    if [[ -n "$old_pids" ]]; then
+        echo "🔪 Killing stale processes on port $DEV_SERVER_PORT: $old_pids"
+        echo "$old_pids" | xargs kill -9 2>/dev/null || true
+        sleep 1
+    fi
+
+    # Start uvicorn with --reload in dev mode
+    echo "🚀 Starting dev server on port $DEV_SERVER_PORT (auto-reload)..."
+    (cd "$PROJECT_DIR" && python3 run.py --dev > /dev/null 2>&1) &
+    DEV_SERVER_PID=$!
+
+    # Wait for server to be ready (max 60s)
+    local waited=0
+    while [[ $waited -lt 60 ]]; do
+        if curl -sf "http://localhost:$DEV_SERVER_PORT/health" > /dev/null 2>&1; then
+            echo "   ✅ Dev server ready (${waited}s, PID $DEV_SERVER_PID, auto-reload on)"
+            return 0
+        fi
+        sleep 1
+        ((waited++))
+    done
+    echo "   ⚠️ Dev server did not become ready in 60s, continuing anyway"
+}
+
+# Start server before entering main loop
+start_dev_server
 
 # ── Helper: wait for rate limit reset ──
 RATE_LIMIT_PATTERN="rate.limit\|overloaded\|529\|too many\|capacity\|hit your limit\|resets.*am\|throttl"
@@ -158,6 +225,7 @@ run_curator() {
 $dev_output"
 
     local response
+    touch "$_session_ref"
     while true; do
         response=$(echo "$curator_input" | env -u ANTHROPIC_API_KEY "$CLAUDE_BIN" \
             --print \
@@ -171,6 +239,7 @@ $dev_output"
             break
         fi
     done
+    capture_session "curator" "$round_num"
 
     # Write compressed progress
     cat > "$PROGRESS_FILE" <<PROGRESS_EOF
@@ -192,8 +261,8 @@ run_reviewer() {
 
     # Read human's messages — both original and dev's reply
     local human_section=""
-    local human_msg_file="$PROJECT_DIR/human_message.md"
-    local human_reply_file="$PROJECT_DIR/human_reply.md"
+    local human_msg_file="$COMMS_DIR/human_message.md"
+    local human_reply_file="$COMMS_DIR/human_reply.md"
     local has_human=false
 
     # Original human message (if not cleared yet)
@@ -229,7 +298,7 @@ $reply_content
 
     # Read reviewer's own past memory
     local reviewer_memory_section=""
-    local reviewer_mem_file="$PROJECT_DIR/reviewer_memory.md"
+    local reviewer_mem_file="$COMMS_DIR/reviewer_memory.md"
     if [[ -f "$reviewer_mem_file" ]]; then
         local mem_content
         mem_content=$(tail -100 "$reviewer_mem_file")  # 最近 100 行，防 context 爆
@@ -242,13 +311,32 @@ $mem_content
 "
     fi
 
+    # Read todo list
+    local todo_section=""
+    local todo_file="$COMMS_DIR/todo.md"
+    if [[ -f "$todo_file" ]]; then
+        local todo_content
+        todo_content=$(cat "$todo_file")
+        todo_section="
+---
+
+# 任務清單（Dev + Reviewer 共用，你可以更新狀態）
+
+$todo_content
+"
+    fi
+
+    # Find tools directory (alongside COMMS_DIR: ../tools or same level)
+    local proj_tools_dir
+    proj_tools_dir="$(dirname "$COMMS_DIR")/tools"
+
     cat > "$prompt_file" <<AGENT_EOF
 你是 AI 審查者（Reviewer）。根據以下規範書與開發原則，對開發者輸出做出判斷。
 
 # 招標規範書（精簡版）
 
 $SPEC_CONTENT
-$human_section$reviewer_memory_section
+$human_section$reviewer_memory_section$todo_section
 ---
 
 # 開發者最新輸出
@@ -261,15 +349,15 @@ $dev_output
 重要規則：
 1. 查看「你過去的審查紀錄」，已經問過且 Dev 已回答的問題，不要再問。往前推進，不要原地踏步。
 2. 如果上面有「人類主管的原話」或「開發者對人類指示的回覆紀錄」，你的回覆第一行必須寫「📌 已讀人類指示：」加一句摘要，然後你的建議必須符合該方向。人類主管的指示優先於你自己的判斷。
+3. 查看「任務清單」，從中挑下一個該做的任務指派給 Dev。
 
-你有一個專用工具可以讀寫你自己的 prompt 檔案（motc_reviewer.prompt.md）：
-- 讀取：bash $SCRIPT_DIR/tools/prompt_rw.sh read
-- 覆寫：echo "新內容" | bash $SCRIPT_DIR/tools/prompt_rw.sh write
-- 追加：echo "追加內容" | bash $SCRIPT_DIR/tools/prompt_rw.sh append
-這是你唯一可以寫入的檔案。用它來更新你的任務清單狀態或修正你的行為規則。
+你的工具：
+- 讀寫 todo：bash $(dirname "$SCRIPT_DIR")/tools/todo_rw.sh $COMMS_DIR read|write|append
+- 讀寫 prompt：bash $SCRIPT_DIR/tools/prompt_rw.sh read|write|append
 AGENT_EOF
 
     local response
+    touch "$_session_ref"
     while true; do
         response=$(cat "$prompt_file" | env -u ANTHROPIC_API_KEY "$CLAUDE_BIN" \
             --print \
@@ -283,6 +371,7 @@ AGENT_EOF
             break
         fi
     done
+    capture_session "reviewer" "${_dev_round:-0}"
 
     rm -f "$prompt_file"
     echo "$response"
@@ -293,6 +382,7 @@ run_dev() {
     local message="$1"
     local response
 
+    touch "$_session_ref"
     while true; do
         if [[ -n "$DEV_SESSION_ID" ]]; then
             response=$(cd "$PROJECT_DIR" && env -u ANTHROPIC_API_KEY "$CLAUDE_BIN" \
@@ -326,6 +416,7 @@ $message"
             break
         fi
     done
+    capture_session "dev" "${_dev_round:-0}"
 
     echo "$response"
 }
@@ -340,10 +431,11 @@ for ((round=1; round<=MAX_ROUNDS; round++)); do
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     # Heartbeat — quick way to check if loop is alive
-    printf '{"pid":%d,"round":%d,"max":%d,"time":"%s","log":"%s"}\n' \
-        $$ $round $MAX_ROUNDS "$(date +"%Y-%m-%d %H:%M:%S")" "$LOOP_LOG" > "$HEARTBEAT_FILE"
+    printf '{"pid":%d,"round":%d,"max":%d,"time":"%s","log":"%s","sessions":"%s"}\n' \
+        $$ $round $MAX_ROUNDS "$(date +"%Y-%m-%d %H:%M:%S")" "$LOOP_LOG" "$SESSION_CSV" > "$HEARTBEAT_FILE"
 
     # ── Step A: Get dev output ──
+    _dev_round=$round  # expose to run_dev for CSV capture
     if [[ $round -eq 1 ]]; then
         if [[ -n "$INITIAL_PROMPT" ]]; then
             echo "🔨 Dev: running initial prompt..."
@@ -422,7 +514,7 @@ $REVIEWER_RESPONSE
 EOF
 
     # ── Append to reviewer memory (persistent across rounds) ──
-    REVIEWER_MEMORY_FILE="$PROJECT_DIR/reviewer_memory.md"
+    REVIEWER_MEMORY_FILE="$COMMS_DIR/reviewer_memory.md"
     if [[ ! -f "$REVIEWER_MEMORY_FILE" ]]; then
         echo "# Reviewer 審查記憶（自動累積，勿手動刪除）" > "$REVIEWER_MEMORY_FILE"
         echo "" >> "$REVIEWER_MEMORY_FILE"
@@ -457,20 +549,31 @@ DEVPROMPT_STATIC
 
     echo "$REVIEWER_RESPONSE" >> "$DEV_PROMPT_FILE"
 
+    # ── Spec path hint for dev ──
+    printf '\n規範書路徑：%s — 不確定需求細節時自己用 Read 工具去看。\n' "$SPEC_PATH" >> "$DEV_PROMPT_FILE"
+
+    # ── Todo list injection for dev ──
+    if [[ -f "$COMMS_DIR/todo.md" ]]; then
+        printf '\n---\n# 任務清單（你和 Reviewer 共用）\n做完一項用 Bash 更新狀態：echo "✅" 追加到 %s/todo.md 對應行\n\n' "$COMMS_DIR" >> "$DEV_PROMPT_FILE"
+        cat "$COMMS_DIR/todo.md" >> "$DEV_PROMPT_FILE"
+    fi
+
     # ── Human hotline: inject human_message.md if present ──
-    HUMAN_MSG_FILE="$PROJECT_DIR/human_message.md"
-    HUMAN_REPLY_FILE="$PROJECT_DIR/human_reply.md"
+    HUMAN_MSG_FILE="$COMMS_DIR/human_message.md"
+    HUMAN_REPLY_FILE="$COMMS_DIR/human_reply.md"
     if [[ -f "$HUMAN_MSG_FILE" ]]; then
         HUMAN_MSG_CONTENT=$(cat "$HUMAN_MSG_FILE")
         if [[ "$HUMAN_MSG_CONTENT" != *"目前沒有人類插話"* && -n "$HUMAN_MSG_CONTENT" ]]; then
-            printf '\n\n⚠️ 人類即時插話（最高優先，讀完後把回覆寫到 %s，然後清空 %s 寫入「（目前沒有人類插話）」）：\n\n' "$HUMAN_REPLY_FILE" "$HUMAN_MSG_FILE" >> "$DEV_PROMPT_FILE"
+            printf '\n\n⚠️ 人類即時插話（最高優先）：\n讀完後用 Bash 把回覆寫到 %s\n\n' "$HUMAN_REPLY_FILE" >> "$DEV_PROMPT_FILE"
             echo "$HUMAN_MSG_CONTENT" >> "$DEV_PROMPT_FILE"
+            # Loop 自動清除，dev 不需要手動清
+            echo "（目前沒有人類插話）" > "$HUMAN_MSG_FILE"
         fi
     fi
 
     printf '\n\n已知背景（不需要再問）：\n\n' >> "$DEV_PROMPT_FILE"
-    if [[ -f "$SCRIPT_DIR/human_context.md" ]]; then
-        cat "$SCRIPT_DIR/human_context.md" >> "$DEV_PROMPT_FILE"
+    if [[ -f "$CONTEXT_PATH" ]]; then
+        cat "$CONTEXT_PATH" >> "$DEV_PROMPT_FILE"
     fi
 
     DEV_MESSAGE=$(cat "$DEV_PROMPT_FILE")
@@ -560,3 +663,5 @@ done
 
 echo "🏁 Loop finished ($MAX_ROUNDS rounds)."
 echo "📄 Full log: $LOOP_LOG"
+echo "📊 Session index: $SESSION_CSV"
+rm -f "$_session_ref"
