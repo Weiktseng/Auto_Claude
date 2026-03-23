@@ -36,6 +36,10 @@ Claude Code 有 **5 層**權限設定，優先級由高到低：
 **核心規則：高層級的 deny 不能被低層級的 allow 覆寫。**
 
 ---
+# 啟動命令範例
+cd /Users/henry/Desktop/公司/AI交通部客服 && nohup /Users/henry/Desktop/公司/Auto_Claude/engine/loop.sh --project-dir /Users/henry/Desktop/公司/AI交通部客服 --max-rounds 50 > .auto_claude/logs/loop_stdout.log 2>&1 &
+
+out:[1] 70931
 
 ## 每一層的詳細說明
 

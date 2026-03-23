@@ -23,6 +23,24 @@ set -uo pipefail
 # Ensure child processes are killed when this script exits
 trap 'kill 0 2>/dev/null' EXIT SIGINT SIGTERM
 
+# ── PID lock: prevent duplicate loop instances ──
+# Lock file 放在 LOG_DIR，但此時還沒 parse args，所以先用暫存位置，
+# parse 完後再搬到正確的 LOG_DIR（見下方 "Relocate lock file"）。
+_EARLY_LOCK_FILE="/tmp/auto_claude_loop.pid"
+if [[ -f "$_EARLY_LOCK_FILE" ]]; then
+    _EXISTING_PID=$(cat "$_EARLY_LOCK_FILE")
+    if kill -0 "$_EXISTING_PID" 2>/dev/null; then
+        echo "❌ Loop already running (PID $_EXISTING_PID). Exiting." >&2
+        echo "   如果確定沒在跑，刪除 $_EARLY_LOCK_FILE 再試。" >&2
+        exit 1
+    else
+        echo "⚠️ Stale lock file found (PID $_EXISTING_PID not running), removing."
+        rm -f "$_EARLY_LOCK_FILE"
+    fi
+fi
+echo $$ > "$_EARLY_LOCK_FILE"
+trap 'rm -f "$_EARLY_LOCK_FILE" "${LOCK_FILE:-}" 2>/dev/null; kill 0 2>/dev/null' EXIT SIGINT SIGTERM
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_BIN="$(which claude 2>/dev/null || echo /Users/henry/.npm-global/bin/claude)"
 
@@ -68,20 +86,45 @@ done
 if [[ -z "$PROJECT_DIR" ]]; then
     echo "Error: --project-dir is required" >&2; exit 1
 fi
-if [[ -z "$SPEC_PATH" ]]; then
-    echo "Error: --spec is required" >&2; exit 1
-fi
 
-# Defaults — 向後相容，沒給新參數就用舊路徑
-PROMPT_TEMPLATE="${PROMPT_TEMPLATE:-$SCRIPT_DIR/prompts/motc_reviewer.prompt.md}"
-CONTEXT_PATH="${CONTEXT_PATH:-$SCRIPT_DIR/human_context.md}"
-COMMS_DIR="${COMMS_DIR:-$PROJECT_DIR}"
+# ── Auto-detect .auto_claude/ in project dir ──
+AUTO_CLAUDE_DIR="$PROJECT_DIR/.auto_claude"
+if [[ -d "$AUTO_CLAUDE_DIR" ]]; then
+    echo "📁 Found .auto_claude/ in project dir"
+    PROMPT_TEMPLATE="${PROMPT_TEMPLATE:-$AUTO_CLAUDE_DIR/prompts/reviewer.prompt.md}"
+    CONTEXT_PATH="${CONTEXT_PATH:-$AUTO_CLAUDE_DIR/context.md}"
+    COMMS_DIR="${COMMS_DIR:-$AUTO_CLAUDE_DIR/comms}"
+    LOG_DIR_OVERRIDE="${LOG_DIR_OVERRIDE:-$AUTO_CLAUDE_DIR/logs}"
+    SPEC_PATH="${SPEC_PATH:-$AUTO_CLAUDE_DIR/spec.txt}"
+else
+    # Fallback — 向後相容舊路徑
+    PROMPT_TEMPLATE="${PROMPT_TEMPLATE:-$SCRIPT_DIR/prompts/motc_reviewer.prompt.md}"
+    CONTEXT_PATH="${CONTEXT_PATH:-$SCRIPT_DIR/human_context.md}"
+    COMMS_DIR="${COMMS_DIR:-$PROJECT_DIR}"
+fi
+if [[ -z "$SPEC_PATH" ]]; then
+    echo "Error: --spec is required (or place spec.txt in .auto_claude/)" >&2; exit 1
+fi
 TEMPLATE_PROMPT=$(cat "$PROMPT_TEMPLATE")
 SPEC_CONTENT=$(cat "$SPEC_PATH")
 
 # ── Log setup ──
 LOG_DIR="${LOG_DIR_OVERRIDE:-$SCRIPT_DIR/logs}"
 mkdir -p "$LOG_DIR"
+
+# ── Relocate lock file to project-specific LOG_DIR ──
+LOCK_FILE="$LOG_DIR/.loop.pid"
+if [[ -f "$LOCK_FILE" ]]; then
+    _EXISTING_PID=$(cat "$LOCK_FILE")
+    if kill -0 "$_EXISTING_PID" 2>/dev/null && [[ "$_EXISTING_PID" != "$$" ]]; then
+        echo "❌ Loop already running for this project (PID $_EXISTING_PID). Exiting." >&2
+        rm -f "$_EARLY_LOCK_FILE"
+        exit 1
+    fi
+fi
+echo $$ > "$LOCK_FILE"
+rm -f "$_EARLY_LOCK_FILE"  # early lock 任務完成，改用 project-specific lock
+
 TIMESTAMP=$(date +"%Y-%m-%d_%H%M%S")_$$
 LOOP_LOG="$LOG_DIR/${TIMESTAMP}_loop.md"
 
@@ -252,12 +295,103 @@ PROGRESS_EOF
     echo "$response"
 }
 
+# ── Helper: summarize reviewer memory ──
+REVIEWER_MEMORY_SUMMARIZER_INTERVAL=12  # 每 N 輪壓縮一次
+
+summarize_reviewer_memory() {
+    local mem_file="$COMMS_DIR/reviewer_memory.md"
+    if [[ ! -f "$mem_file" ]]; then return; fi
+
+    local mem_size
+    mem_size=$(wc -l < "$mem_file" | tr -d ' ')
+    if [[ $mem_size -lt 60 ]]; then
+        echo "   Reviewer memory only ${mem_size} lines, skip summarize"
+        return
+    fi
+
+    echo "📝 Summarizing reviewer memory (${mem_size} lines)..."
+
+    local mem_content
+    mem_content=$(cat "$mem_file")
+
+    local summarizer_prompt
+    summarizer_prompt="你是 Reviewer Memory Summarizer。你的任務是壓縮審查記憶，保留重要資訊，刪除垃圾。
+
+輸入是 reviewer 累積的審查記憶。請輸出壓縮版，遵守以下規則：
+
+## 必須保留（保留原文，不改寫）
+1. **每一個質疑（Reviewer 問的問題）和對應的答案（Dev 怎麼回的）** — 這是最重要的，用 Q/A 格式保留原文
+2. **人類主管的指示** — 原文保留，標記 📌
+3. **關鍵決策和結論** — 例如「確認 OK」「這個方案接受」
+4. **未解決的問題** — 標記 ⚠️
+
+## 必須刪除
+1. \`Error: Input must be provided\` 等系統錯誤訊息 — 全刪
+2. \`Prompt 已送出\` \`好 繼續\` 等無實質內容的確認訊息 — 全刪
+3. \`Reviewer 連線失敗。Dev 先做這些：\` 的 fallback 訊息 — 全刪
+4. 重複的任務狀態回報（同一件事報告多次，只留最終結果）
+5. 重複的 Playwright 測試報告（17/17 通過重複出現，只留最新一次）
+
+## 輸出格式
+\`\`\`
+# Reviewer 審查記憶（摘要版 — YYYY-MM-DD HH:MM 壓縮）
+
+每一條是 reviewer 過去某一輪的回覆摘要。已經問過/確認過的事不要再問。
+
+## 關鍵 Q&A 紀錄
+（按時間序列出每個質疑和答案）
+
+## 📌 人類指示摘要
+（所有人類主管的指示）
+
+## 當前狀態
+（最新的任務狀態、測試結果）
+
+## ⚠️ 未解決
+（還沒解決的問題）
+\`\`\`
+
+以下是要壓縮的內容：
+
+$mem_content"
+
+    local response
+    touch "$_session_ref"
+    while true; do
+        response=$(echo "$summarizer_prompt" | env -u ANTHROPIC_API_KEY "$CLAUDE_BIN" \
+            --print \
+            --model sonnet \
+            --disallowed-tools "Bash Write Edit Glob Grep WebFetch WebSearch NotebookEdit Agent" \
+            - 2>&1)
+        if echo "$response" | grep -qi "$RATE_LIMIT_PATTERN"; then
+            wait_for_rate_limit "MemorySummarizer" "$response"
+        else
+            break
+        fi
+    done
+    capture_session "memory_summarizer" "${_dev_round:-0}"
+
+    # Validate: response should be non-empty and not an error
+    local resp_len=${#response}
+    if [[ $resp_len -lt 50 ]] || echo "$response" | grep -qi "^Error:"; then
+        echo "   ⚠️ Summarizer failed (${resp_len} chars), keeping original memory"
+        return
+    fi
+
+    # Backup then replace
+    cp "$mem_file" "${mem_file}.bak"
+    echo "$response" > "$mem_file"
+    local new_lines
+    new_lines=$(wc -l < "$mem_file" | tr -d ' ')
+    echo "   ✅ Reviewer memory: ${mem_size} → ${new_lines} lines (backup: reviewer_memory.md.bak)"
+}
+
 # ── Helper: run reviewer ──
 run_reviewer() {
     local dev_output="$1"
 
     local prompt_file
-    prompt_file=$(mktemp /tmp/reviewer_prompt_XXXXXX.txt)
+    prompt_file=$(mktemp /tmp/reviewer_prompt_XXXXXX)
 
     # Read human's messages — both original and dev's reply
     local human_section=""
@@ -357,14 +491,35 @@ $dev_output
 AGENT_EOF
 
     local response
+    local _reviewer_timeout=600  # 10 minutes max for reviewer
     touch "$_session_ref"
     while true; do
-        response=$(cat "$prompt_file" | env -u ANTHROPIC_API_KEY "$CLAUDE_BIN" \
+        local _rev_output_file
+        _rev_output_file=$(mktemp /tmp/auto_claude_rev.XXXXXX)
+        (cd "$PROJECT_DIR" && env -u ANTHROPIC_API_KEY "$CLAUDE_BIN" \
             --print \
             --model "$MODEL_REVIEWER" \
             --append-system-prompt "$TEMPLATE_PROMPT" \
-            --disallowed-tools "Write Edit NotebookEdit Agent" --allowedTools "WebFetch WebSearch Read Glob Grep mcp__entropyshield__*" \
-            - 2>&1)
+            --disallowed-tools "Write Edit NotebookEdit Agent mcp__playwright__*" --allowedTools "WebFetch WebSearch Read Glob Grep mcp__entropyshield__*" \
+            - < "$prompt_file" > "$_rev_output_file" 2>&1) &
+        local _rev_pid=$!
+        local _waited=0
+        while kill -0 "$_rev_pid" 2>/dev/null; do
+            sleep 5
+            _waited=$((_waited + 5))
+            if [[ $_waited -ge $_reviewer_timeout ]]; then
+                echo "⏰ Reviewer timed out after ${_reviewer_timeout}s, killing PID $_rev_pid..."
+                kill "$_rev_pid" 2>/dev/null; sleep 2; kill -9 "$_rev_pid" 2>/dev/null
+                break
+            fi
+        done
+        wait "$_rev_pid" 2>/dev/null
+        response=$(cat "$_rev_output_file")
+        rm -f "$_rev_output_file"
+        if [[ $_waited -ge $_reviewer_timeout ]]; then
+            echo "⏰ Retrying reviewer..."
+            continue
+        fi
         if echo "$response" | grep -qi "$RATE_LIMIT_PATTERN"; then
             wait_for_rate_limit "Reviewer" "$response"
         else
@@ -378,18 +533,24 @@ AGENT_EOF
 }
 
 # ── Helper: run dev ──
+# Dev output streams to a live log file so you can tail -f it
+DEV_LIVE_LOG=""  # Set per-round in main loop
+
 run_dev() {
     local message="$1"
-    local response
+    local _dev_output_file
+    _dev_output_file=$(mktemp /tmp/auto_claude_dev_output.XXXXXX)
 
     touch "$_session_ref"
     while true; do
         if [[ -n "$DEV_SESSION_ID" ]]; then
-            response=$(cd "$PROJECT_DIR" && env -u ANTHROPIC_API_KEY "$CLAUDE_BIN" \
+            (cd "$PROJECT_DIR" && env -u ANTHROPIC_API_KEY "$CLAUDE_BIN" \
                 --print \
                 --model "$MODEL_DEV" \
                 --resume "$DEV_SESSION_ID" \
-                "$message" 2>&1)
+                "$message" 2>&1) | tee "$_dev_output_file" > "${DEV_LIVE_LOG:-/dev/null}" &
+            local _dev_pid=$!
+            wait $_dev_pid
         else
             DEV_SESSION_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
             local full_message="$message"
@@ -404,27 +565,34 @@ $progress_content
 
 $message"
             fi
-            response=$(cd "$PROJECT_DIR" && env -u ANTHROPIC_API_KEY "$CLAUDE_BIN" \
+            (cd "$PROJECT_DIR" && env -u ANTHROPIC_API_KEY "$CLAUDE_BIN" \
                 --print \
                 --model "$MODEL_DEV" \
                 --session-id "$DEV_SESSION_ID" \
-                "$full_message" 2>&1)
+                "$full_message" 2>&1) | tee "$_dev_output_file" > "${DEV_LIVE_LOG:-/dev/null}" &
+            local _dev_pid=$!
+            wait $_dev_pid
         fi
-        if echo "$response" | grep -qi "$RATE_LIMIT_PATTERN"; then
-            wait_for_rate_limit "Dev" "$response"
+        if grep -qi "$RATE_LIMIT_PATTERN" "$_dev_output_file" 2>/dev/null; then
+            local _rl_content
+            _rl_content=$(cat "$_dev_output_file")
+            wait_for_rate_limit "Dev" "$_rl_content"
+            > "$_dev_output_file"  # clear for retry
         else
             break
         fi
     done
     capture_session "dev" "${_dev_round:-0}"
 
-    echo "$response"
+    cat "$_dev_output_file"
+    rm -f "$_dev_output_file"
 }
 
 # ── Heartbeat file ──
 HEARTBEAT_FILE="$LOG_DIR/heartbeat"
 
 # ── Main loop ──
+_INJECT_DETAIL_UPGRADE=false  # Set true when Reviewer triggers detail upgrade phase
 for ((round=1; round<=MAX_ROUNDS; round++)); do
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "📍 Round $round / $MAX_ROUNDS"
@@ -447,6 +615,10 @@ for ((round=1; round<=MAX_ROUNDS; round++)); do
                 echo "❌ Could not extract dev output. Exiting."
                 exit 1
             }
+            # Round 1 抓到的可能是上次 loop 的 reviewer 殘留，加標註
+            DEV_OUTPUT="⚠️ 以下是 loop 重啟時從上次 session 擷取的輸出。可能是 Dev 或 Reviewer 的最後回應，請根據內容判斷。
+
+${DEV_OUTPUT}"
         fi
     fi
 
@@ -467,11 +639,15 @@ for ((round=1; round<=MAX_ROUNDS; round++)); do
     DEV_CHARS=${#DEV_OUTPUT}
     echo "   Dev output: ${DEV_CHARS} chars"
 
-    # Log dev output
+    # Log dev output (Round 1 可能是上次 session 殘留)
+    local _output_label="Dev Output"
+    if [[ $round -eq 1 && -z "$INITIAL_PROMPT" ]]; then
+        _output_label="Previous Session Output (may be Dev or Reviewer)"
+    fi
     cat >> "$LOOP_LOG" <<EOF
 ## Round $round — $(date +"%H:%M:%S")
 
-### Dev Output (${DEV_CHARS} chars)
+### ${_output_label} (${DEV_CHARS} chars)
 
 $DEV_OUTPUT
 
@@ -493,11 +669,18 @@ EOF
 
     REVIEWER_CHARS=${#REVIEWER_RESPONSE}
 
-    # Empty response guard
-    if [[ $REVIEWER_CHARS -lt 5 ]]; then
-        echo "⚠️ Reviewer returned empty/near-empty response, substituting fallback"
-        REVIEWER_RESPONSE="reviewer agent 連線有問題 這一輪先繼續能做的"
+    # Error/empty response guard
+    if [[ $REVIEWER_CHARS -lt 5 ]] || echo "$REVIEWER_RESPONSE" | grep -qi "^Error:"; then
+        echo "⚠️ Reviewer error or empty response (${REVIEWER_CHARS} chars), retrying once..."
+        echo "   Response was: $(echo "$REVIEWER_RESPONSE" | head -1)"
+        # Retry once
+        REVIEWER_RESPONSE=$(run_reviewer "$DEV_OUTPUT")
         REVIEWER_CHARS=${#REVIEWER_RESPONSE}
+        if [[ $REVIEWER_CHARS -lt 5 ]] || echo "$REVIEWER_RESPONSE" | grep -qi "^Error:"; then
+            echo "⚠️ Reviewer retry also failed, using fallback"
+            REVIEWER_RESPONSE="Reviewer 連線失敗。Dev 先做這些：用 Playwright 逐頁檢查所有按鈕是否正常、所有表單是否能送出、所有頁面是否有 JS error。修完一輪 commit。"
+            REVIEWER_CHARS=${#REVIEWER_RESPONSE}
+        fi
     fi
 
     echo "   Reviewer response: ${REVIEWER_CHARS} chars (${REVIEWER_DURATION}s)"
@@ -533,7 +716,7 @@ AMEOF
     DEV_START=$(date +%s)
     # Build dev prompt via temp file to avoid shell expansion issues
     QUESTIONS_FILE="$SCRIPT_DIR/questions_for_human.md"
-    DEV_PROMPT_FILE=$(mktemp /tmp/dev_prompt_XXXXXX.txt)
+    DEV_PROMPT_FILE=$(mktemp /tmp/dev_prompt_XXXXXX)
 
     cat > "$DEV_PROMPT_FILE" <<'DEVPROMPT_STATIC'
 規則：
@@ -542,6 +725,8 @@ AMEOF
 3. 每輪結束時報告：做了什麼（具體檔案/功能）、下一步打算做什麼。
 4. 目標：3/31 在另一台乾淨電腦上能展示給政府官員看。
 5. 停止協議：如果你確認所有剩餘工作都需要人類才能繼續，且 reviewer 也同意，在回覆中輸出 <!JOB_STOP_NOTHINGS_CAN_DO!>。不要輕易用——先想想有沒有任何能做的事。
+6. 不要為了讓測試通過而 hard-code 值。測試驗證正確性，不定義解法。如果測試本身有問題，回報而不是繞過。
+7. 如果過程中建了暫存檔（test_*.py、debug_*.sh、tmp_*），做完後刪掉。
 
 以下是 AI 審查者（Reviewer）的回饋：
 
@@ -551,6 +736,20 @@ DEVPROMPT_STATIC
 
     # ── Spec path hint for dev ──
     printf '\n規範書路徑：%s — 不確定需求細節時自己用 Read 工具去看。\n' "$SPEC_PATH" >> "$DEV_PROMPT_FILE"
+
+    # ── Dev memory injection ──
+    DEV_MEMORY_FILE="$COMMS_DIR/dev_memory.md"
+    if [[ -f "$DEV_MEMORY_FILE" ]]; then
+        mem_size=$(wc -c < "$DEV_MEMORY_FILE" | tr -d ' ')
+        if [[ $mem_size -gt 50 ]]; then  # skip if only header/placeholder
+            printf '\n---\n# 你的筆記（dev_memory.md — 只有你會看到，Reviewer 看不到）\n' >> "$DEV_PROMPT_FILE"
+            printf '重要：每輪結束前把關鍵發現寫回這個檔案（用 Bash append）。\n' >> "$DEV_PROMPT_FILE"
+            printf '記：已測過哪些頁面/功能、發現的 workaround、待修的技術債、API 行為觀察。\n' >> "$DEV_PROMPT_FILE"
+            printf '⚠️ 注意：系統只注入此檔案的最後 80 行。新內容請 append 到檔尾，不要寫在開頭。過時的筆記可以刪掉以節省空間。\n' >> "$DEV_PROMPT_FILE"
+            printf '路徑：%s\n\n' "$DEV_MEMORY_FILE" >> "$DEV_PROMPT_FILE"
+            tail -80 "$DEV_MEMORY_FILE" >> "$DEV_PROMPT_FILE"  # 最近 80 行，防 context 爆
+        fi
+    fi
 
     # ── Todo list injection for dev ──
     if [[ -f "$COMMS_DIR/todo.md" ]]; then
@@ -566,9 +765,36 @@ DEVPROMPT_STATIC
         if [[ "$HUMAN_MSG_CONTENT" != *"目前沒有人類插話"* && -n "$HUMAN_MSG_CONTENT" ]]; then
             printf '\n\n⚠️ 人類即時插話（最高優先）：\n讀完後用 Bash 把回覆寫到 %s\n\n' "$HUMAN_REPLY_FILE" >> "$DEV_PROMPT_FILE"
             echo "$HUMAN_MSG_CONTENT" >> "$DEV_PROMPT_FILE"
+            # ── 永久記錄 human message（不給任何 agent 讀，純歷史） ──
+            printf '\n---\n[%s] Round %s\n%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$round" "$HUMAN_MSG_CONTENT" >> "$COMMS_DIR/human_message_history.log"
+            echo "📝 Human message archived to human_message_history.log"
+
             # Loop 自動清除，dev 不需要手動清
             echo "（目前沒有人類插話）" > "$HUMAN_MSG_FILE"
         fi
+    fi
+
+    # ── Detail upgrade guide injection (triggered by Reviewer signal) ──
+    UPGRADE_GUIDES_DIR="$PROJECT_DIR/detail_upgrade_guides"
+    if [[ "$_INJECT_DETAIL_UPGRADE" == true ]]; then
+        _guide_count=0
+        if [[ -d "$UPGRADE_GUIDES_DIR" ]]; then
+            for _guide_file in "$UPGRADE_GUIDES_DIR"/*.md; do
+                [[ -f "$_guide_file" ]] || continue
+                _guide_name=$(basename "$_guide_file" .md)
+                printf '\n\n---\n# 📦 Detail Upgrade Guide: %s\n\n' "$_guide_name" >> "$DEV_PROMPT_FILE"
+                cat "$_guide_file" >> "$DEV_PROMPT_FILE"
+                echo "📦 Injected guide: $_guide_name"
+                ((_guide_count++))
+            done
+        fi
+        if [[ $_guide_count -eq 0 ]]; then
+            printf '\n\n---\n# 📦 Detail Upgrade — 資料夾是空的，人類尚未放入升級指南。先做你能做的打磨。\n' >> "$DEV_PROMPT_FILE"
+            echo "⚠️ No guides found in $UPGRADE_GUIDES_DIR"
+        else
+            echo "📦 Injected $_guide_count guide(s) total"
+        fi
+        _INJECT_DETAIL_UPGRADE=false
     fi
 
     printf '\n\n已知背景（不需要再問）：\n\n' >> "$DEV_PROMPT_FILE"
@@ -579,6 +805,9 @@ DEVPROMPT_STATIC
     DEV_MESSAGE=$(cat "$DEV_PROMPT_FILE")
     rm -f "$DEV_PROMPT_FILE"
 
+    DEV_LIVE_LOG="$LOG_DIR/dev_live_round${round}.log"
+    > "$DEV_LIVE_LOG"  # clear
+    echo "   📡 Dev live log: tail -f $DEV_LIVE_LOG"
     DEV_OUTPUT=$(run_dev "$DEV_MESSAGE")
 
     # Rate limit guard for dev Step C
@@ -636,6 +865,18 @@ EOF
         break
     fi
 
+    # ── Detail upgrade phase: Reviewer triggers, human controls content ──
+    # Reviewer sends <!PHASE_DETAIL_UPGRADE!> (or legacy <!PHASE_UI_POLISH!>)
+    # Loop injects ALL .md files in references/detail_upgrade_guides/
+    # Human manages what's in that folder — add/remove files to control what dev sees
+    if echo "$REVIEWER_RESPONSE" | grep -qF '<!PHASE_DETAIL_UPGRADE!>'; then
+        _INJECT_DETAIL_UPGRADE=true
+        echo "📦 Reviewer triggered detail upgrade phase"
+    elif echo "$REVIEWER_RESPONSE" | grep -qF '<!PHASE_UI_POLISH!>'; then
+        _INJECT_DETAIL_UPGRADE=true
+        echo "📦 Reviewer triggered detail upgrade phase (legacy UI_POLISH signal)"
+    fi
+
     # ── Step D-1: Curator — every N rounds, compress context and start fresh session ──
     if [[ $((round % CURATOR_INTERVAL)) -eq 0 && $round -lt $MAX_ROUNDS ]]; then
         echo "🧹 Round $round: Curator triggered (every ${CURATOR_INTERVAL} rounds)"
@@ -658,6 +899,11 @@ EOF
 
         echo "   New session will start with progress.md context"
         echo ""
+    fi
+
+    # ── Step D-2: Reviewer memory summarizer — periodic compression ──
+    if [[ $((round % REVIEWER_MEMORY_SUMMARIZER_INTERVAL)) -eq 0 && $round -lt $MAX_ROUNDS ]]; then
+        summarize_reviewer_memory
     fi
 done
 
