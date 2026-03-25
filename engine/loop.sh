@@ -16,6 +16,8 @@
 #   4. Repeat from 1
 #
 
+LOOP_VERSION="3.1"
+
 set -uo pipefail
 # NOTE: 不用 set -e，因為 main loop 內的 grep/claude 指令可能回傳非 0，
 # 不應該讓整個腳本因此死掉。關鍵錯誤靠明確的 || exit 處理。
@@ -91,6 +93,8 @@ fi
 AUTO_CLAUDE_DIR="$PROJECT_DIR/.auto_claude"
 if [[ -d "$AUTO_CLAUDE_DIR" ]]; then
     echo "📁 Found .auto_claude/ in project dir"
+    # Prevent macOS Spotlight from indexing logs/comms (causes mds_stores CPU spike)
+    touch "$AUTO_CLAUDE_DIR/.metadata_never_index" 2>/dev/null
     PROMPT_TEMPLATE="${PROMPT_TEMPLATE:-$AUTO_CLAUDE_DIR/prompts/reviewer.prompt.md}"
     CONTEXT_PATH="${CONTEXT_PATH:-$AUTO_CLAUDE_DIR/context.md}"
     COMMS_DIR="${COMMS_DIR:-$AUTO_CLAUDE_DIR/comms}"
@@ -164,7 +168,7 @@ capture_session() {
     touch "$_session_ref"  # reset for next call
 }
 
-echo "🔄 Auto_Claude Dev ↔ Reviewer Loop"
+echo "🔄 Auto_Claude Dev ↔ Reviewer Loop (v${LOOP_VERSION})"
 echo "   Reviewer: $MODEL_REVIEWER | Dev: $MODEL_DEV"
 echo "   Project: $PROJECT_DIR"
 echo "   Max rounds: $MAX_ROUNDS"
@@ -640,8 +644,8 @@ ${DEV_OUTPUT}"
     echo "   Dev output: ${DEV_CHARS} chars"
 
     # Log dev output (Round 1 可能是上次 session 殘留)
-    local _output_label="Dev Output"
-    if [[ $round -eq 1 && -z "$INITIAL_PROMPT" ]]; then
+    _output_label="Dev Output"
+    if [[ $round -eq 1 && -z "${INITIAL_PROMPT:-}" ]]; then
         _output_label="Previous Session Output (may be Dev or Reviewer)"
     fi
     cat >> "$LOOP_LOG" <<EOF
