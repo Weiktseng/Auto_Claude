@@ -195,6 +195,73 @@ Reviewer 只需要讀取能力，不需要操控瀏覽器：
 
 ---
 
+## 六、實測紀錄（2026-03-26）
+
+### Claude Preview — 全項通過 ✅
+
+測試環境：`test_server/app.py`（Python HTTP server, port 8099），5 按鈕 + 表單 + API + CSS 驗證區
+
+| 測試項 | 結果 | 備註 |
+|--------|------|------|
+| `preview_start` | ✅ | 從 `.claude/launch.json` 啟動，返回 serverId |
+| `preview_screenshot` | ✅ | JPEG 截圖，看佈局清晰 |
+| `preview_snapshot` | ✅ | 返回完整 accessibility tree，每個元素有 ID |
+| `preview_click(selector)` | ✅ | CSS selector 精準點擊 `#btn-ok`、`#btn-submit`、`#btn-api-get` |
+| `preview_fill(selector, value)` | ✅ | 填寫 input/textarea/select 都成功 |
+| `preview_inspect(selector, styles)` | ✅ | 返回精確 CSS 值：`color: rgb(13, 148, 136)`、`font-size: 18px` |
+| `preview_console_logs(level="error")` | ✅ | 無錯誤時返回空 |
+| `preview_network` | ✅ | 列出所有請求含 status code，可用 requestId 查 response body |
+
+**結論：完全可以取代 Playwright MCP。** 優勢：不搶 browser profile lock、不需要真實瀏覽器、CSS selector 比座標更穩定。
+
+### Computer Use — 部分通過 ⚠️
+
+| 測試項 | 結果 | 備註 |
+|--------|------|------|
+| `request_access` | ✅ | Finder=full, Chrome=read-only（安全限制，瀏覽器不給完整控制） |
+| `screenshot` | ✅ | 截到完整桌面，未授權 App 會被隱藏 |
+| `open_application` | ✅ | 開啟 Finder 成功 |
+| `computer_batch` | ✅ | 6 步驟（key→wait→type→key→wait→screenshot）一次完成 |
+| 中文路徑 | ⚠️ | Finder "Go To Folder" 對話框中文路徑導航可能失敗，用英文路徑更穩 |
+| Chrome 操控 | ❌ | 瀏覽器被鎖定為 read-only tier，只能截圖不能點擊打字 |
+
+**結論：適合桌面級操作（Finder、Terminal），但瀏覽器測試不如 Claude Preview。**
+
+### Claude in Chrome — 全項通過 ✅
+
+| 測試項 | 結果 | 備註 |
+|--------|------|------|
+| `tabs_context_mcp` | ✅ | 取得 tab group 和 tabId |
+| `navigate` | ✅ | 導航到 localhost:8099 |
+| `computer(screenshot)` | ✅ | 真實 Chrome 截圖，看到實際渲染結果 |
+| `find(自然語言)` | ✅ | `"OK button"` → ref_4, `"name input field"` → ref_11, `"role dropdown"` → ref_13 |
+| `computer(left_click, ref)` | ✅ | 用 ref 點擊按鈕，result 區顯示 "OK button clicked ✅" |
+| `form_input(ref, value)` | ✅ | 填入文字、選擇下拉選項都成功 |
+| `javascript_tool` | ✅ | 讀取 DOM 值成功 |
+| `get_page_text` | ✅ | 提取完整頁面純文字（含 script 內容） |
+
+**結論：真實瀏覽器操控完全正常。** 自然語言 `find` 是殺手級功能 — 不需要知道 CSS selector，說「搜尋按鈕」就能找到元素。適合 agent 在不熟悉頁面結構時使用。
+
+**vs Claude Preview 差異：**
+- Chrome 操控的是真實瀏覽器（有 cookie、登入狀態、真實渲染）
+- Preview 是 headless 內建瀏覽器（更輕量、不衝突）
+- Chrome 的 `find` 用自然語言，Preview 的 `click` 用 CSS selector
+- Chrome 的 `get_page_text` 會連 script 內容一起輸出，Preview 的 `snapshot` 只輸出 accessibility tree
+
+### 工具選擇決策樹
+
+```
+需要測試 Web UI？
+├─ 是 → 有 dev server 嗎？
+│   ├─ 是 → 用 Claude Preview（最穩定、不衝突）
+│   └─ 否 → 用 Claude in Chrome（需要擴充套件）
+└─ 否 → 需要操控桌面 App？
+    ├─ 是 → 用 Computer Use（Finder、Terminal 等）
+    └─ 否 → 用 Bash / Read / Write 等內建工具
+```
+
+---
+
 ## 五、取代 Playwright MCP 的遷移路徑
 
 目前 motc 用 Playwright MCP 做 UI 測試，但有 profile lock 衝突問題。遷移方案：
