@@ -772,7 +772,7 @@ AMEOF
     DEV_PROMPT_FILE=$(mktemp /tmp/dev_prompt_XXXXXX)
 
     # Load dev prompt: from agent/dev/prompt.md if exists, otherwise hardcoded fallback
-    local _dev_prompt_content=""
+    _dev_prompt_content=""
     if [[ -n "$AGENT_DIR" && -f "$AGENT_DIR/dev/prompt.md" ]]; then
         _dev_prompt_content=$(cat "$AGENT_DIR/dev/prompt.md")
     else
