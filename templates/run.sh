@@ -17,7 +17,8 @@
 ENGINE_TAG=""  # 例如 "v3.1"
 
 # ── 路徑設定 ──
-PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJ_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENGINE_REPO="/Users/henry/Desktop/公司/Auto_Claude"
 
 # ── 切換引擎版本（如果有指定 tag）──
@@ -41,5 +42,5 @@ if [[ -n "$ENGINE_TAG" ]]; then
 fi
 
 exec "$ENGINE_REPO/engine/loop.sh" \
-    --project-dir "/path/to/your/project" \
+    --project-dir "$PROJ_DIR" \
     "$@"
