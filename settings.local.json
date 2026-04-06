@@ -124,8 +124,32 @@
       "mcp__Claude_Preview__*",
       "mcp__Claude_in_Chrome__*",
       "mcp__computer-use__*",
+      "mcp__chrome__*",
       "mcp__mcp-registry__*",
-      "mcp__scheduled-tasks__*"
+      "mcp__scheduled-tasks__*",
+      "mcp__cron-manager__*",
+
+      "Bash(nohup *)",
+      "Bash(nohup *&&*)",
+      "Bash(sleep *)",
+      "Bash(sleep *&&*)",
+      "Bash(jq *)",
+      "Bash(jq *|*)",
+      "Bash(sync *)",
+      "Bash(launchctl *)",
+      "Bash(pgrep *)",
+      "Bash(pkill *)",
+      "Bash(nohup *&*)",
+      "Bash(bash *)",
+      "Bash(bash *&&*)",
+      "Bash(sh *)",
+      "Bash(sh *&&*)",
+      "Bash(for *)",
+      "Bash(while *)",
+      "Bash(if *)",
+
+      "Bash(claude *)",
+      "Bash(claude:*)"
     ],
     "deny": [
       "Bash(rm -rf /)",
@@ -137,5 +161,6 @@
       "Bash(git push * --force *)",
       "Bash(git reset --hard *)"
     ]
-  }
+  },
+  "enableAllProjectMcpServers": true
 }

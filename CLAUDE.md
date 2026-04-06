@@ -16,5 +16,6 @@
 
 ### 已知專案路徑
 - **motc（交通部客服）**: `/Users/henry/Desktop/公司/AI交通部客服/.auto_claude/`
+- **baphiq（犬貓晶片/防檢署客服）**: `/Users/henry/Desktop/公司/犬貓晶片/.auto_claude/`
 
 操作前自問：「這個檔案屬於引擎還是專案？」專案的東西永遠在專案目錄下。

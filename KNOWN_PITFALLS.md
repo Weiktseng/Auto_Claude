@@ -126,6 +126,38 @@
 
 ---
 
+## 11. Round 1 沒給 `--initial-prompt` 導致啟動失敗
+
+**現象**：Loop 啟動後 Round 1 立刻報 `❌ Could not extract dev output. Exiting.`，一輪都沒跑。
+
+**原因**：Round 1 有兩種模式：
+1. **有 `--initial-prompt`**：把 prompt 直接餵給 Dev，Dev 從零開始做事 ← 大部分情況要這個
+2. **沒有 `--initial-prompt`**：用 `extract_session.py` 從上次中斷的 session 擷取輸出，接續上次的進度 ← 只適合 loop 意外中斷後的 resume
+
+如果是**新啟動**（不是 resume 上次中斷的 session），不帶 `--initial-prompt` 就會走 extract 路線，但上次的 session 可能已經不存在、被 compact、或屬於不同的 loop，extract 失敗 → 整個 loop 退出。
+
+**這個問題很常遇到**，因為：
+- 人類習慣直接 `run.sh --max-rounds 50` 就跑
+- Loop 意外中斷後重啟，如果中間隔太久 session 已失效
+- gstack fork 等實驗性 loop 更容易遇到（沒有穩定的 session 歷史）
+
+**正確做法**：
+
+```bash
+# ✅ 新啟動 — 永遠帶 --initial-prompt
+.auto_claude/run.sh --max-rounds 50 --initial-prompt "讀取 progress.md 確認進度，繼續實作"
+
+# ✅ Resume 上次中斷 — 確認 session 還在才不帶
+.auto_claude/run.sh --max-rounds 50
+
+# ✅ 通用安全寫法（即使是 resume 也給一個 fallback prompt）
+.auto_claude/run.sh --max-rounds 50 --initial-prompt "檢查上次進度，繼續工作"
+```
+
+**建議**：除非確定要 resume 且 session 還活著，**一律帶 `--initial-prompt`**。給一個通用的「繼續工作」prompt 比 extract 失敗好。
+
+---
+
 ## 模式總結：Claude 容易犯的系統性錯誤
 
 | 模式 | 例子 | 對策 |

@@ -1,6 +1,13 @@
-做兩件事：
+## Round 17 指派
 
-1. 跑 `python tests/test_motc_cases.py` 看 summary() 輸出。確認 386 題都載入、沒有 empty_ref。
-2. 啟動 server 後跑 `HEADLESS=1 python tests/test_motc_quality.py` 但只測前 3 題（改 QUALITY_TEST_CASES[:3] 或加 --limit 3）。目的是驗證 Playwright + LLM scorer pipeline 能走完，不是跑全量。
+人類主管次要任務尚未完成，請處理：
 
-把 summary 輸出和 3 題結果貼回來。
+1. **快速按鈕驗證** — 首頁的犬貓進口/出口、狂犬病檢測、晶片與疫苗按鈕，點擊後是否正確觸發對話或導航
+2. **語言切換驗證** — 切換各語系後 UI 文字是否正確替換，快速按鈕文字是否跟著換
+3. **跑人類指定的測試**：
+   - `uv run python tests/test_petq_api.py`
+   - `HEADLESS=1 uv run python tests/test_petq_e2e.py`
+   - 回報每支的 pass/fail 數量
+4. 有問題就修，修完再跑一次
+
+Round 16 的 confirm/cache/RWD 改動已驗收通過 ✅

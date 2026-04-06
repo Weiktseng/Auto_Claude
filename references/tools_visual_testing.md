@@ -248,6 +248,26 @@ Reviewer 只需要讀取能力，不需要操控瀏覽器：
 - Chrome 的 `find` 用自然語言，Preview 的 `click` 用 CSS selector
 - Chrome 的 `get_page_text` 會連 script 內容一起輸出，Preview 的 `snapshot` 只輸出 accessibility tree
 
+### 跨工具協作技巧（實測發現）
+
+**問題：** Computer Use 對 Chrome 只有 read-only 權限（截圖可以、點擊不行），Claude in Chrome 能操作 tab 內容但無法把 tab 切到前景讓人類看到。
+
+**解法：** 用 Claude in Chrome 的 `javascript_tool` 執行 `window.focus()`
+
+```
+javascript_tool(tabId, "window.focus()")
+```
+
+效果：
+- ✅ 把 Chrome 視窗帶到所有 App 前面
+- ✅ 同時激活指定的 tab（讓人類看到操作過程）
+- ✅ 穩定可重複，已驗證 2 次
+
+**注意：** `chrome.tabs.update()` 在頁面 context 裡沒權限，不能用。`window.focus()` 是唯一可行方案。
+
+**更簡單的替代方案（未測試）：**
+如果把 Computer Use 的 Chrome 權限從 read 升到 full（`request_access` 時指定），理論上可以直接用 Computer Use 點擊 tab。但風險是 Computer Use 和 Claude in Chrome 同時操控 Chrome 可能產生衝突。
+
 ### 工具選擇決策樹
 
 ```
@@ -262,15 +282,122 @@ Reviewer 只需要讀取能力，不需要操控瀏覽器：
 
 ---
 
-## 五、取代 Playwright MCP 的遷移路徑
+## 五、`--print` 模式下的工具可用性（2026-03-26 實測結論）
 
-目前 motc 用 Playwright MCP 做 UI 測試，但有 profile lock 衝突問題。遷移方案：
+### 關鍵發現：SDK MCP 是 Claude.app 獨佔的
 
-1. **短期**：Reviewer 拔掉 Playwright MCP（已在 loop.sh 的 `--disallowed-tools` 中限制）
-2. **中期**：Dev 改用 Claude Preview 做 UI 測試（不需要真實瀏覽器）
-3. **長期**：需要真實瀏覽器時用 Claude in Chrome（不衝突）
+Claude.app 啟動 session 時的實際命令（從 session jsonl 逆向取得）：
 
-遷移時 Dev context.md 加一行：
 ```
-禁止使用 Playwright MCP。用 Claude Preview 的 preview_* 工具做 UI 測試。
+/Users/henry/Library/Application Support/Claude/claude-code/2.1.78/claude.app/Contents/MacOS/claude
+  --input-format stream-json --output-format stream-json
+  --mcp-config {"mcpServers":{
+    "Claude Preview":    {"type":"sdk","name":"Claude Preview"},
+    "Claude in Chrome":  {"type":"sdk","name":"Claude in Chrome"},
+    "computer-use":      {"type":"sdk","name":"computer-use"},
+    "scheduled-tasks":   {"type":"sdk","name":"scheduled-tasks"},
+    "mcp-registry":      {"type":"sdk","name":"mcp-registry"},
+    "plugin:github:github": {"type":"sdk","name":"plugin:github:github"}
+  }}
 ```
+
+**`"type":"sdk"` 不是獨立 process** — 它由 Claude.app 的 Electron 主進程作為 runtime host。
+`claude --print`（headless CLI）無法載入 SDK MCP，即使用同一個二進位檔 + 同樣的 `--mcp-config` 也不行。
+
+### 可用性矩陣
+
+| 工具 | MCP type | Claude.app 互動 | `claude --print` | loop.sh Dev |
+|------|----------|-----------------|------------------|-------------|
+| **Playwright** | `stdio` | ✅ | ✅ | ✅ 唯一可用 |
+| **EntropyShield** | `stdio` | ✅ | ✅ | ✅ |
+| **Claude Preview** | `sdk` | ✅ | ❌ | ❌ |
+| **Claude in Chrome** | `sdk` | ✅ | ❌ | ❌ |
+| **Computer Use** | `sdk` | ✅ | ❌ | ❌ |
+
+### SDK MCP 底層拆解
+
+SDK MCP 不神奇，只是包裝：
+
+| SDK MCP | 底層實現 | stdio 可替代方案 |
+|---------|---------|-----------------|
+| Computer Use | macOS Accessibility API / AppleScript | PyAutoGUI + screencapture |
+| Claude Preview | 內建 headless browser | **Playwright MCP（已有）** |
+| Claude in Chrome | Chrome DevTools Protocol via Native Messaging | 直接跟 chrome-native-host 通訊 |
+
+Chrome MCP 的鏈條：
+```
+Claude.app → SDK runtime → chrome-native-host (stdio) → Chrome 擴充套件 → 真實 Chrome
+                           ↑ 這個是獨立 binary，用 stdio 協議
+```
+
+Native Messaging Host 路徑：`/Applications/Claude.app/Contents/Helpers/chrome-native-host`
+
+### 遷移路徑（修正版）
+
+~~原計畫：Dev 改用 Claude Preview → 不可行（SDK MCP）~~
+
+修正方案：
+
+1. **短期（現在）**：Dev 用 Playwright MCP（headless `stdio`）自檢，Reviewer 禁用 Playwright 防 hang
+2. **中期**：自建 stdio MCP server 包裝 Playwright，提供 Claude Preview 同等 API：
+   - `preview_screenshot` → `playwright screenshot`
+   - `preview_click` → `playwright click`
+   - `preview_fill` → `playwright fill`
+   - `preview_snapshot` → `playwright accessibility tree`
+   - `find(自然語言)` → LLM 解析 accessibility tree 找元素
+3. **長期**：用 Claude Agent SDK（直接 API）重寫 loop，脫離對 CLI 的依賴
+
+---
+
+## 六、Chrome MCP 實戰坑（2026-03-26 踩過的）
+
+### CodeMirror / Monaco 等富文字編輯器
+
+`computer(type)` 打字時 `\n` 不會被解析成換行，變成純文字 `\n`。
+
+**解法**：用 `javascript_tool` 直接操作編輯器 API：
+```javascript
+// CodeMirror
+document.querySelector('.CodeMirror').CodeMirror.setValue("line1\nline2")
+
+// Monaco (VS Code 系)
+monaco.editor.getModels()[0].setValue("line1\nline2")
+```
+
+### Facebook / Threads 等 contentEditable
+
+這類網站用 `contentEditable` div，不是 `<textarea>`。`form_input` 可能不生效。
+
+**解法**：用 `computer(left_click)` 點進去 → `computer(type)` 打字 → `key(Enter)` 換行
+
+### Chrome Tab 前景切換
+
+Claude in Chrome 操作 tab 內容不需要 tab 在前面，但人類看不到。
+
+**解法**：`javascript_tool("window.focus()")` 可以把 tab 帶到前景。
+
+### 工具間 MCP 獨佔
+
+Claude.app 互動 session 佔住 SDK MCP 時，同機器的 `claude --print` 無法使用同一 MCP。Chrome 擴充套件是單連線。
+
+**解法**：跑 loop 前關掉 Claude.app，或用不同的 MCP（Playwright）。
+
+---
+
+## 七、Gist 發文端到端驗證（2026-03-26 ✅）
+
+完整流程，全自動無人工介入：
+
+1. `tabs_context_mcp(createIfEmpty=true)` → tabId
+2. `navigate(tabId, "https://gist.github.com")` → 登入狀態自動帶入
+3. `find("Gist description input")` → ref_66
+4. `form_input(ref_66, "描述文字")` → 填入描述
+5. `find("filename input")` → ref_70
+6. `form_input(ref_70, "hello_from_claude.md")` → 填入檔名
+7. `javascript_tool("document.querySelector('.CodeMirror').CodeMirror.setValue(...)")` → 填入內容（含換行）
+8. `find("Create secret gist button")` → ref_128
+9. `computer(left_click, ref=ref_128)` → 發布
+10. `computer(screenshot)` → 驗證成功，Markdown 渲染正確
+
+**結論：Claude in Chrome 可以完成任何有「輸入 + 發布」的網站操作。**
+關鍵技巧：遇到富文字編輯器用 JS 注入，遇到普通表單用 form_input。

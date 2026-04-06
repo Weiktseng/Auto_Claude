@@ -46,6 +46,32 @@ trap 'rm -f "$_EARLY_LOCK_FILE" "${LOCK_FILE:-}" 2>/dev/null; kill 0 2>/dev/null
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLAUDE_BIN="$(which claude 2>/dev/null || echo /Users/henry/.npm-global/bin/claude)"
 
+# ── CLI version check (soft warning, no longer blocks) ──
+MIN_CLI_VERSION="2.1.84"
+ACTUAL_CLI_VERSION=$("$CLAUDE_BIN" --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+if [[ -n "$ACTUAL_CLI_VERSION" ]]; then
+    echo "ℹ️  CLI version: $ACTUAL_CLI_VERSION"
+else
+    echo "⚠️  Could not detect CLI version"
+fi
+
+# ── Load .env if exists (for API key) ──
+# API key / OAuth handled by _load_env() after PROJECT_DIR is set
+_load_env() {
+    local env_file="$PROJECT_DIR/.auto_claude/.env"
+    if [[ -f "$env_file" ]]; then
+        source "$env_file"
+        if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+            export ANTHROPIC_API_KEY
+            echo "🔑 Using API key from .auto_claude/.env"
+            return
+        fi
+    fi
+    # No API key found — strip any inherited key to force OAuth
+    unset ANTHROPIC_API_KEY
+    echo "🔓 Using OAuth (no API key)"
+}
+
 # ── Defaults ──
 MODEL_REVIEWER="opus"
 MODEL_DEV="opus"
@@ -58,6 +84,10 @@ LOG_DIR_OVERRIDE=""
 MAX_ROUNDS=10
 DEV_SESSION_ID=""
 INITIAL_PROMPT=""
+# ⚠️ KNOWN PITFALL #11: 新啟動時不帶 --initial-prompt 會導致 Round 1 嘗試
+#    extract 上次 session 的輸出，若 session 不存在則立刻 exit。
+#    除非確定要 resume 上次中斷的 session，否則一律帶 --initial-prompt。
+#    詳見 KNOWN_PITFALLS.md #11。
 
 # ── Parse arguments ──
 while [[ $# -gt 0 ]]; do
@@ -91,15 +121,21 @@ fi
 
 # ── Auto-detect .auto_claude/ in project dir ──
 AUTO_CLAUDE_DIR="$PROJECT_DIR/.auto_claude"
+AGENT_DIR=""  # Set below if .auto_claude/ exists
 if [[ -d "$AUTO_CLAUDE_DIR" ]]; then
     echo "📁 Found .auto_claude/ in project dir"
-    # Prevent macOS Spotlight from indexing logs/comms (causes mds_stores CPU spike)
+    AGENT_DIR="$AUTO_CLAUDE_DIR/agent"
+    # Prevent macOS Spotlight from indexing (causes mds_stores CPU spike)
     touch "$AUTO_CLAUDE_DIR/.metadata_never_index" 2>/dev/null
-    PROMPT_TEMPLATE="${PROMPT_TEMPLATE:-$AUTO_CLAUDE_DIR/prompts/reviewer.prompt.md}"
-    CONTEXT_PATH="${CONTEXT_PATH:-$AUTO_CLAUDE_DIR/context.md}"
-    COMMS_DIR="${COMMS_DIR:-$AUTO_CLAUDE_DIR/comms}"
+    # Load API key if available
+    _load_env
+    # Ensure agent subdirectories exist
+    mkdir -p "$AGENT_DIR/reviewer" "$AGENT_DIR/curator" "$AGENT_DIR/dev" "$AGENT_DIR/comms"
+    PROMPT_TEMPLATE="${PROMPT_TEMPLATE:-$AGENT_DIR/reviewer/prompt.md}"
+    CONTEXT_PATH="${CONTEXT_PATH:-$AGENT_DIR/context.md}"
+    COMMS_DIR="${COMMS_DIR:-$AGENT_DIR/comms}"
     LOG_DIR_OVERRIDE="${LOG_DIR_OVERRIDE:-$AUTO_CLAUDE_DIR/logs}"
-    SPEC_PATH="${SPEC_PATH:-$AUTO_CLAUDE_DIR/spec.txt}"
+    SPEC_PATH="${SPEC_PATH:-$AGENT_DIR/spec.txt}"
 else
     # Fallback — 向後相容舊路徑
     PROMPT_TEMPLATE="${PROMPT_TEMPLATE:-$SCRIPT_DIR/prompts/motc_reviewer.prompt.md}"
@@ -209,7 +245,11 @@ start_dev_server() {
 }
 
 # Start server before entering main loop
-start_dev_server
+if [[ "${SKIP_DEV_SERVER:-}" != "1" ]]; then
+    start_dev_server
+else
+    echo "⏭️  SKIP_DEV_SERVER=1, skipping dev server startup"
+fi
 
 # ── Helper: wait for rate limit reset ──
 RATE_LIMIT_PATTERN="rate.limit\|overloaded\|529\|too many\|capacity\|hit your limit\|resets.*am\|throttl"
@@ -257,9 +297,9 @@ RATELIMIT
 }
 
 # ── Helper: run curator (compress tool outputs) ──
-CURATOR_PROMPT=$(cat "$SCRIPT_DIR/prompts/curator.prompt.md" 2>/dev/null || echo "Compress tool call outputs to one-line logs keeping key content.")
+CURATOR_PROMPT=$(cat "${AGENT_DIR:+$AGENT_DIR/curator/prompt.md}" 2>/dev/null || cat "$SCRIPT_DIR/prompts/curator.prompt.md" 2>/dev/null || echo "Compress tool call outputs to one-line logs keeping key content.")
 CURATOR_INTERVAL=8
-PROGRESS_FILE="$PROJECT_DIR/progress.md"
+PROGRESS_FILE="${AGENT_DIR:-$PROJECT_DIR}/dev/progress.md"
 
 run_curator() {
     local dev_output="$1"
@@ -274,7 +314,7 @@ $dev_output"
     local response
     touch "$_session_ref"
     while true; do
-        response=$(echo "$curator_input" | env -u ANTHROPIC_API_KEY "$CLAUDE_BIN" \
+        response=$(echo "$curator_input" | "$CLAUDE_BIN" \
             --print \
             --model sonnet \
             --append-system-prompt "$CURATOR_PROMPT" \
@@ -303,7 +343,7 @@ PROGRESS_EOF
 REVIEWER_MEMORY_SUMMARIZER_INTERVAL=12  # 每 N 輪壓縮一次
 
 summarize_reviewer_memory() {
-    local mem_file="$COMMS_DIR/reviewer_memory.md"
+    local mem_file="${AGENT_DIR:-$COMMS_DIR}/reviewer/memory.md"
     if [[ ! -f "$mem_file" ]]; then return; fi
 
     local mem_size
@@ -362,7 +402,7 @@ $mem_content"
     local response
     touch "$_session_ref"
     while true; do
-        response=$(echo "$summarizer_prompt" | env -u ANTHROPIC_API_KEY "$CLAUDE_BIN" \
+        response=$(echo "$summarizer_prompt" | "$CLAUDE_BIN" \
             --print \
             --model sonnet \
             --disallowed-tools "Bash Write Edit Glob Grep WebFetch WebSearch NotebookEdit Agent" \
@@ -436,7 +476,7 @@ $reply_content
 
     # Read reviewer's own past memory
     local reviewer_memory_section=""
-    local reviewer_mem_file="$COMMS_DIR/reviewer_memory.md"
+    local reviewer_mem_file="${AGENT_DIR:-$COMMS_DIR}/reviewer/memory.md"
     if [[ -f "$reviewer_mem_file" ]]; then
         local mem_content
         mem_content=$(tail -100 "$reviewer_mem_file")  # 最近 100 行，防 context 爆
@@ -464,9 +504,9 @@ $todo_content
 "
     fi
 
-    # Find tools directory (alongside COMMS_DIR: ../tools or same level)
+    # Find tools directory
     local proj_tools_dir
-    proj_tools_dir="$(dirname "$COMMS_DIR")/tools"
+    proj_tools_dir="${AUTO_CLAUDE_DIR:-$(dirname "$COMMS_DIR")}/tools"
 
     cat > "$prompt_file" <<AGENT_EOF
 你是 AI 審查者（Reviewer）。根據以下規範書與開發原則，對開發者輸出做出判斷。
@@ -500,7 +540,7 @@ AGENT_EOF
     while true; do
         local _rev_output_file
         _rev_output_file=$(mktemp /tmp/auto_claude_rev.XXXXXX)
-        (cd "$PROJECT_DIR" && env -u ANTHROPIC_API_KEY "$CLAUDE_BIN" \
+        (cd "$PROJECT_DIR" && "$CLAUDE_BIN" \
             --print \
             --model "$MODEL_REVIEWER" \
             --append-system-prompt "$TEMPLATE_PROMPT" \
@@ -548,7 +588,7 @@ run_dev() {
     touch "$_session_ref"
     while true; do
         if [[ -n "$DEV_SESSION_ID" ]]; then
-            (cd "$PROJECT_DIR" && env -u ANTHROPIC_API_KEY "$CLAUDE_BIN" \
+            (cd "$PROJECT_DIR" && "$CLAUDE_BIN" \
                 --print \
                 --model "$MODEL_DEV" \
                 --resume "$DEV_SESSION_ID" \
@@ -569,7 +609,7 @@ $progress_content
 
 $message"
             fi
-            (cd "$PROJECT_DIR" && env -u ANTHROPIC_API_KEY "$CLAUDE_BIN" \
+            (cd "$PROJECT_DIR" && "$CLAUDE_BIN" \
                 --print \
                 --model "$MODEL_DEV" \
                 --session-id "$DEV_SESSION_ID" \
@@ -588,6 +628,9 @@ $message"
     done
     capture_session "dev" "${_dev_round:-0}"
 
+    # Belt-and-suspenders: wait a beat for tee to flush
+    sync 2>/dev/null
+    sleep 1
     cat "$_dev_output_file"
     rm -f "$_dev_output_file"
 }
@@ -607,6 +650,10 @@ for ((round=1; round<=MAX_ROUNDS; round++)); do
         $$ $round $MAX_ROUNDS "$(date +"%Y-%m-%d %H:%M:%S")" "$LOOP_LOG" "$SESSION_CSV" > "$HEARTBEAT_FILE"
 
     # ── Step A: Get dev output ──
+    # ⚠️ KNOWN PITFALL #11: Round 1 的兩種模式
+    #    有 --initial-prompt → 直接餵 Dev，適合新啟動（大部分場景）
+    #    沒有              → extract 上次 session，適合中斷後 resume（session 必須還在）
+    #    新啟動忘了帶 --initial-prompt 是最常見的啟動失敗原因。
     _dev_round=$round  # expose to run_dev for CSV capture
     if [[ $round -eq 1 ]]; then
         if [[ -n "$INITIAL_PROMPT" ]]; then
@@ -614,9 +661,11 @@ for ((round=1; round<=MAX_ROUNDS; round++)); do
             DEV_OUTPUT=$(run_dev "$INITIAL_PROMPT")
         else
             echo "📥 Extracting latest dev session output..."
+            echo "   💡 如果這步失敗，請加 --initial-prompt 重新啟動（詳見 KNOWN_PITFALLS.md #11）"
             DEV_OUTPUT=$(python3 "$SCRIPT_DIR/extract_session.py" \
                 "$PROJECT_DIR" --lines 3 --memory --format prompt 2>&1) || {
                 echo "❌ Could not extract dev output. Exiting."
+                echo "💡 提示：新啟動請用 --initial-prompt \"你的指令\"。只有 resume 中斷的 loop 才不需要。"
                 exit 1
             }
             # Round 1 抓到的可能是上次 loop 的 reviewer 殘留，加標註
@@ -634,8 +683,8 @@ ${DEV_OUTPUT}"
         continue
     fi
     if [[ ${#DEV_OUTPUT} -lt 10 ]]; then
-        echo "⚠️ Dev output too short (${#DEV_OUTPUT} chars), retrying in 30s..."
-        sleep 30
+        echo "⚠️ Dev output too short (${#DEV_OUTPUT} chars), retrying in 5s... (cache race condition)"
+        sleep 5
         ((round--))
         continue
     fi
@@ -701,7 +750,7 @@ $REVIEWER_RESPONSE
 EOF
 
     # ── Append to reviewer memory (persistent across rounds) ──
-    REVIEWER_MEMORY_FILE="$COMMS_DIR/reviewer_memory.md"
+    REVIEWER_MEMORY_FILE="${AGENT_DIR:-$COMMS_DIR}/reviewer/memory.md"
     if [[ ! -f "$REVIEWER_MEMORY_FILE" ]]; then
         echo "# Reviewer 審查記憶（自動累積，勿手動刪除）" > "$REVIEWER_MEMORY_FILE"
         echo "" >> "$REVIEWER_MEMORY_FILE"
