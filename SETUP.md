@@ -39,7 +39,7 @@ cd EntropyShield && pip install -e .
 
 ```bash
 # chrome-mcp-bridge（視覺測試用）
-git clone <chrome-mcp-bridge-repo>
+git clone git@github.com:Weiktseng/Auto_Claude_chrome-mcp-bridge.git chrome-mcp-bridge
 # 使用前需啟動 Chrome:
 # open -a 'Google Chrome' --args --remote-debugging-port=9222
 
