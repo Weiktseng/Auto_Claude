@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "chrome": {
+      "command": "python3",
+      "args": ["<path-to>/chrome-mcp-bridge/src/chrome_mcp_server.py"],
+      "env": {
+        "CHROME_CDP_PORT": "9222"
+      },
+      "_note": "操控真實 Chrome 瀏覽器（截圖、點擊、填表）。需先啟動 Chrome: open -a 'Google Chrome' --args --remote-debugging-port=9222"
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest", "--headless"],
+      "_note": "Headless 瀏覽器自動化測試。npm 公開套件，不需額外安裝。"
+    }
+  }
+}
