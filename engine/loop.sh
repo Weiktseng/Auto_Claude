@@ -771,15 +771,22 @@ AMEOF
     QUESTIONS_FILE="$SCRIPT_DIR/questions_for_human.md"
     DEV_PROMPT_FILE=$(mktemp /tmp/dev_prompt_XXXXXX)
 
-    cat > "$DEV_PROMPT_FILE" <<'DEVPROMPT_STATIC'
-規則：
+    # Load dev prompt: from agent/dev/prompt.md if exists, otherwise hardcoded fallback
+    local _dev_prompt_content=""
+    if [[ -n "$AGENT_DIR" && -f "$AGENT_DIR/dev/prompt.md" ]]; then
+        _dev_prompt_content=$(cat "$AGENT_DIR/dev/prompt.md")
+    else
+        _dev_prompt_content='規則：
 1. 直接動手做事，不要問問題。你是 RD，寫程式是你的工作。
 2. 如果有問題只有人類能回答，把問題追加寫到 questions_for_human.md，然後繼續做你能做的部分。
 3. 每輪結束時報告：做了什麼（具體檔案/功能）、下一步打算做什麼。
-4. 目標：3/31 在另一台乾淨電腦上能展示給政府官員看。
-5. 停止協議：如果你確認所有剩餘工作都需要人類才能繼續，且 reviewer 也同意，在回覆中輸出 <!JOB_STOP_NOTHINGS_CAN_DO!>。不要輕易用——先想想有沒有任何能做的事。
-6. 不要為了讓測試通過而 hard-code 值。測試驗證正確性，不定義解法。如果測試本身有問題，回報而不是繞過。
-7. 如果過程中建了暫存檔（test_*.py、debug_*.sh、tmp_*），做完後刪掉。
+4. 停止協議：如果你確認所有剩餘工作都需要人類才能繼續，且 reviewer 也同意，在回覆中輸出 <!JOB_STOP_NOTHINGS_CAN_DO!>。不要輕易用——先想想有沒有任何能做的事。
+5. 不要為了讓測試通過而 hard-code 值。測試驗證正確性，不定義解法。如果測試本身有問題，回報而不是繞過。
+6. 如果過程中建了暫存檔（test_*.py、debug_*.sh、tmp_*），做完後刪掉。'
+    fi
+
+    cat > "$DEV_PROMPT_FILE" <<DEVPROMPT_STATIC
+$_dev_prompt_content
 
 以下是 AI 審查者（Reviewer）的回饋：
 
@@ -791,7 +798,7 @@ DEVPROMPT_STATIC
     printf '\n規範書路徑：%s — 不確定需求細節時自己用 Read 工具去看。\n' "$SPEC_PATH" >> "$DEV_PROMPT_FILE"
 
     # ── Dev memory injection ──
-    DEV_MEMORY_FILE="$COMMS_DIR/dev_memory.md"
+    DEV_MEMORY_FILE="${AGENT_DIR:-$COMMS_DIR}/dev/memory.md"
     if [[ -f "$DEV_MEMORY_FILE" ]]; then
         mem_size=$(wc -c < "$DEV_MEMORY_FILE" | tr -d ' ')
         if [[ $mem_size -gt 50 ]]; then  # skip if only header/placeholder
