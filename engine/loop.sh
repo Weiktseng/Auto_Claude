@@ -4,15 +4,17 @@
 # 全自動 Dev ↔ Reviewer 對話迴圈
 #
 # Usage:
-#   ./agent/loop.sh --project-dir <path> --spec <path> [options]
+#   ./engine/loop.sh --project-dir <path> --spec <path> [options]
+#   ./engine/loop.sh --project-dir <path> --human --initial-prompt "..."   # 人類取代 Reviewer
 #
-# Quick start (交通部):
-#   ./agent/motc_loop.sh
+# Modes:
+#   (default)  全自動 Dev ↔ AI Reviewer 迴圈
+#   --human    人類取代 Reviewer，直接跟 Dev 對話（輸入完按 Ctrl+D 送出，q 退出）
 #
 # Flow:
-#   1. Extract dev's latest output
-#   2. Reviewer reviews → produces feedback
-#   3. Inject feedback into dev session → dev continues working
+#   1. Dev 執行任務
+#   2. Reviewer（AI 或人類）審查 → 產出回饋
+#   3. 回饋注入 Dev session → Dev 繼續工作
 #   4. Repeat from 1
 #
 
@@ -84,6 +86,7 @@ LOG_DIR_OVERRIDE=""
 MAX_ROUNDS=10
 DEV_SESSION_ID=""
 INITIAL_PROMPT=""
+HUMAN_MODE=false
 # ⚠️ KNOWN PITFALL #11: 新啟動時不帶 --initial-prompt 會導致 Round 1 嘗試
 #    extract 上次 session 的輸出，若 session 不存在則立刻 exit。
 #    除非確定要 resume 上次中斷的 session，否則一律帶 --initial-prompt。
@@ -103,6 +106,7 @@ while [[ $# -gt 0 ]]; do
         --max-rounds)       MAX_ROUNDS="$2";         shift 2 ;;
         --resume-session)   DEV_SESSION_ID="$2";     shift 2 ;;
         --initial-prompt)   INITIAL_PROMPT="$2";     shift 2 ;;
+        --human)            HUMAN_MODE=true;         shift ;;
         --help|-h)
             head -16 "$0" | grep "^#" | sed 's/^# \?//'
             exit 0
@@ -204,8 +208,13 @@ capture_session() {
     touch "$_session_ref"  # reset for next call
 }
 
-echo "🔄 Auto_Claude Dev ↔ Reviewer Loop (v${LOOP_VERSION})"
-echo "   Reviewer: $MODEL_REVIEWER | Dev: $MODEL_DEV"
+if [[ "$HUMAN_MODE" == true ]]; then
+    echo "🔄 Auto_Claude Human ↔ Dev Mode (v${LOOP_VERSION})"
+    echo "   Reviewer: 👤 YOU | Dev: $MODEL_DEV"
+else
+    echo "🔄 Auto_Claude Dev ↔ Reviewer Loop (v${LOOP_VERSION})"
+    echo "   Reviewer: $MODEL_REVIEWER | Dev: $MODEL_DEV"
+fi
 echo "   Project: $PROJECT_DIR"
 echo "   Max rounds: $MAX_ROUNDS"
 echo "   Log: $LOOP_LOG"
@@ -807,34 +816,54 @@ $DEV_OUTPUT
 EOF
 
     # ── Step B: Reviewer reviews ──
-    echo "🧠 Reviewer ($MODEL_REVIEWER) reviewing..."
     REVIEWER_START=$(date +%s)
-    REVIEWER_RESPONSE=$(run_reviewer "$DEV_OUTPUT")
-    REVIEWER_END=$(date +%s)
-    REVIEWER_DURATION=$((REVIEWER_END - REVIEWER_START))
-    # Rate limit guard for reviewer
-    if echo "$REVIEWER_RESPONSE" | grep -qi "$RATE_LIMIT_PATTERN"; then
-        echo "🛡️ Main loop caught rate limit in reviewer response, waiting..."
-        wait_for_rate_limit "Reviewer (main loop)" "$REVIEWER_RESPONSE"
-        ((round--))
-        continue
-    fi
-
-    REVIEWER_CHARS=${#REVIEWER_RESPONSE}
-
-    # Error/empty response guard
-    if [[ $REVIEWER_CHARS -lt 5 ]] || echo "$REVIEWER_RESPONSE" | grep -qi "^Error:"; then
-        echo "⚠️ Reviewer error or empty response (${REVIEWER_CHARS} chars), retrying once..."
-        echo "   Response was: $(echo "$REVIEWER_RESPONSE" | head -1)"
-        # Retry once
+    if [[ "$HUMAN_MODE" == true ]]; then
+        echo ""
+        echo "════════════════════════════════════════"
+        echo "👤 你的回合 — 輸入你要給 Dev 的指令"
+        echo "   （輸入完按 Ctrl+D 送出，輸入 q 退出）"
+        echo "════════════════════════════════════════"
+        echo ""
+        REVIEWER_RESPONSE=""
+        while IFS= read -r _human_line; do
+            [[ "$_human_line" == "q" ]] && echo "🛑 人類退出。" && exit 0
+            REVIEWER_RESPONSE="${REVIEWER_RESPONSE}${_human_line}
+"
+        done
+        if [[ -z "${REVIEWER_RESPONSE// /}" ]]; then
+            echo "⚠️ 空輸入，跳過這輪。"
+            continue
+        fi
+    else
+        echo "🧠 Reviewer ($MODEL_REVIEWER) reviewing..."
         REVIEWER_RESPONSE=$(run_reviewer "$DEV_OUTPUT")
+        # Rate limit guard for reviewer
+        if echo "$REVIEWER_RESPONSE" | grep -qi "$RATE_LIMIT_PATTERN"; then
+            echo "🛡️ Main loop caught rate limit in reviewer response, waiting..."
+            wait_for_rate_limit "Reviewer (main loop)" "$REVIEWER_RESPONSE"
+            ((round--))
+            continue
+        fi
+
         REVIEWER_CHARS=${#REVIEWER_RESPONSE}
+
+        # Error/empty response guard
         if [[ $REVIEWER_CHARS -lt 5 ]] || echo "$REVIEWER_RESPONSE" | grep -qi "^Error:"; then
-            echo "⚠️ Reviewer retry also failed, using fallback"
-            REVIEWER_RESPONSE="Reviewer 連線失敗。Dev 先做這些：用 Playwright 逐頁檢查所有按鈕是否正常、所有表單是否能送出、所有頁面是否有 JS error。修完一輪 commit。"
+            echo "⚠️ Reviewer error or empty response (${REVIEWER_CHARS} chars), retrying once..."
+            echo "   Response was: $(echo "$REVIEWER_RESPONSE" | head -1)"
+            # Retry once
+            REVIEWER_RESPONSE=$(run_reviewer "$DEV_OUTPUT")
             REVIEWER_CHARS=${#REVIEWER_RESPONSE}
+            if [[ $REVIEWER_CHARS -lt 5 ]] || echo "$REVIEWER_RESPONSE" | grep -qi "^Error:"; then
+                echo "⚠️ Reviewer retry also failed, using fallback"
+                REVIEWER_RESPONSE="Reviewer 連線失敗。Dev 先做這些：用 Playwright 逐頁檢查所有按鈕是否正常、所有表單是否能送出、所有頁面是否有 JS error。修完一輪 commit。"
+                REVIEWER_CHARS=${#REVIEWER_RESPONSE}
+            fi
         fi
     fi
+    REVIEWER_END=$(date +%s)
+    REVIEWER_DURATION=$((REVIEWER_END - REVIEWER_START))
+    REVIEWER_CHARS=${#REVIEWER_RESPONSE}
 
     echo "   Reviewer response: ${REVIEWER_CHARS} chars (${REVIEWER_DURATION}s)"
     echo ""
@@ -865,12 +894,18 @@ $REVIEWER_RESPONSE
 AMEOF
 
     # ── Step C: Dev continues with reviewer feedback ──
-    echo "🔨 Dev ($MODEL_DEV) continuing with reviewer feedback..."
     DEV_START=$(date +%s)
-
-    DEV_MESSAGE=$(build_dev_prompt "以下是 AI 審查者（Reviewer）的回饋：
+    if [[ "$HUMAN_MODE" == true ]]; then
+        echo "🔨 Dev ($MODEL_DEV) 執行人類指令..."
+        DEV_MESSAGE=$(build_dev_prompt "以下是人類主管的直接指令（最高優先）：
 
 $REVIEWER_RESPONSE")
+    else
+        echo "🔨 Dev ($MODEL_DEV) continuing with reviewer feedback..."
+        DEV_MESSAGE=$(build_dev_prompt "以下是 AI 審查者（Reviewer）的回饋：
+
+$REVIEWER_RESPONSE")
+    fi
 
     DEV_LIVE_LOG="$LOG_DIR/dev_live_round${round}.log"
     > "$DEV_LIVE_LOG"  # clear
