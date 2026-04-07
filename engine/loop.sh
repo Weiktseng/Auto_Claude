@@ -819,6 +819,12 @@ EOF
     REVIEWER_START=$(date +%s)
     if [[ "$HUMAN_MODE" == true ]]; then
         echo ""
+        echo "┌──────────────────────────────────────────┐"
+        echo "│ 📋 Dev 輸出 (${DEV_CHARS} chars)         "
+        echo "└──────────────────────────────────────────┘"
+        echo ""
+        echo "$DEV_OUTPUT"
+        echo ""
         echo "════════════════════════════════════════"
         echo "👤 你的回合 — 輸入你要給 Dev 的指令"
         echo "   （輸入完按 Ctrl+D 送出，輸入 q 退出）"
