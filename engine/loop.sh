@@ -638,6 +638,106 @@ $message"
 # ── Heartbeat file ──
 HEARTBEAT_FILE="$LOG_DIR/heartbeat"
 
+# ── Helper: build dev prompt with all injections ──
+# Usage: build_dev_prompt "reviewer feedback or initial prompt"
+# Injects: dev rules, human_message, todo, dev_memory, context, detail guides
+build_dev_prompt() {
+    local _main_content="$1"
+    local _prompt_file
+    _prompt_file=$(mktemp /tmp/dev_prompt_XXXXXX)
+
+    # Load dev prompt rules
+    local _dev_prompt_content=""
+    if [[ -n "$AGENT_DIR" && -f "$AGENT_DIR/dev/prompt.md" ]]; then
+        _dev_prompt_content=$(cat "$AGENT_DIR/dev/prompt.md")
+    else
+        _dev_prompt_content='規則：
+1. 直接動手做事，不要問問題。你是 RD，寫程式是你的工作。
+2. 如果有問題只有人類能回答，把問題追加寫到 questions_for_human.md，然後繼續做你能做的部分。
+3. 每輪結束時報告：做了什麼（具體檔案/功能）、下一步打算做什麼。
+4. 停止協議：如果你確認所有剩餘工作都需要人類才能繼續，且 reviewer 也同意，在回覆中輸出 <!JOB_STOP_NOTHINGS_CAN_DO!>。不要輕易用——先想想有沒有任何能做的事。
+5. 不要為了讓測試通過而 hard-code 值。測試驗證正確性，不定義解法。如果測試本身有問題，回報而不是繞過。
+6. 如果過程中建了暫存檔（test_*.py、debug_*.sh、tmp_*），做完後刪掉。'
+    fi
+
+    cat > "$_prompt_file" <<DEVPROMPT_STATIC
+$_dev_prompt_content
+
+$_main_content
+DEVPROMPT_STATIC
+
+    # ── Spec path hint ──
+    printf '\n規範書路徑：%s — 不確定需求細節時自己用 Read 工具去看。\n' "$SPEC_PATH" >> "$_prompt_file"
+
+    # ── Dev memory injection ──
+    local _dev_mem_file="${AGENT_DIR:-$COMMS_DIR}/dev/memory.md"
+    if [[ -f "$_dev_mem_file" ]]; then
+        local _mem_size
+        _mem_size=$(wc -c < "$_dev_mem_file" | tr -d ' ')
+        if [[ $_mem_size -gt 50 ]]; then
+            printf '\n---\n# 你的筆記（dev_memory.md — 只有你會看到，Reviewer 看不到）\n' >> "$_prompt_file"
+            printf '重要：每輪結束前把關鍵發現寫回這個檔案（用 Bash append）。\n' >> "$_prompt_file"
+            printf '⚠️ 注意：系統只注入此檔案的最後 80 行。新內容請 append 到檔尾。\n' >> "$_prompt_file"
+            printf '路徑：%s\n\n' "$_dev_mem_file" >> "$_prompt_file"
+            tail -80 "$_dev_mem_file" >> "$_prompt_file"
+        fi
+    fi
+
+    # ── Todo list injection ──
+    if [[ -f "$COMMS_DIR/todo.md" ]]; then
+        printf '\n---\n# 任務清單（你和 Reviewer 共用）\n做完一項用 Bash 更新狀態：echo "✅" 追加到 %s/todo.md 對應行\n\n' "$COMMS_DIR" >> "$_prompt_file"
+        cat "$COMMS_DIR/todo.md" >> "$_prompt_file"
+    fi
+
+    # ── Human hotline: inject human_message.md if present ──
+    local _hmsg_file="$COMMS_DIR/human_message.md"
+    local _hreply_file="$COMMS_DIR/human_reply.md"
+    if [[ -f "$_hmsg_file" ]]; then
+        local _hmsg_content
+        _hmsg_content=$(cat "$_hmsg_file")
+        if [[ "$_hmsg_content" != *"目前沒有人類插話"* && -n "$_hmsg_content" ]]; then
+            printf '\n\n⚠️ 人類即時插話（最高優先）：\n讀完後用 Bash 把回覆寫到 %s\n\n' "$_hreply_file" >> "$_prompt_file"
+            echo "$_hmsg_content" >> "$_prompt_file"
+            printf '\n---\n[%s] Round %s\n%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$round" "$_hmsg_content" >> "$COMMS_DIR/human_message_history.log"
+            echo "📝 Human message archived to human_message_history.log"
+            echo "（目前沒有人類插話）" > "$_hmsg_file"
+        fi
+    fi
+
+    # ── Detail upgrade guide injection ──
+    local _upgrade_dir="$PROJECT_DIR/detail_upgrade_guides"
+    if [[ "$_INJECT_DETAIL_UPGRADE" == true ]]; then
+        local _guide_count=0
+        if [[ -d "$_upgrade_dir" ]]; then
+            local _guide_file
+            for _guide_file in "$_upgrade_dir"/*.md; do
+                [[ -f "$_guide_file" ]] || continue
+                local _guide_name
+                _guide_name=$(basename "$_guide_file" .md)
+                printf '\n\n---\n# 📦 Detail Upgrade Guide: %s\n\n' "$_guide_name" >> "$_prompt_file"
+                cat "$_guide_file" >> "$_prompt_file"
+                echo "📦 Injected guide: $_guide_name"
+                ((_guide_count++))
+            done
+        fi
+        if [[ $_guide_count -eq 0 ]]; then
+            printf '\n\n---\n# 📦 Detail Upgrade — 資料夾是空的，人類尚未放入升級指南。先做你能做的打磨。\n' >> "$_prompt_file"
+        else
+            echo "📦 Injected $_guide_count guide(s) total"
+        fi
+        _INJECT_DETAIL_UPGRADE=false
+    fi
+
+    # ── Context injection ──
+    printf '\n\n已知背景（不需要再問）：\n\n' >> "$_prompt_file"
+    if [[ -f "$CONTEXT_PATH" ]]; then
+        cat "$CONTEXT_PATH" >> "$_prompt_file"
+    fi
+
+    cat "$_prompt_file"
+    rm -f "$_prompt_file"
+}
+
 # ── Main loop ──
 _INJECT_DETAIL_UPGRADE=false  # Set true when Reviewer triggers detail upgrade phase
 for ((round=1; round<=MAX_ROUNDS; round++)); do
@@ -658,7 +758,7 @@ for ((round=1; round<=MAX_ROUNDS; round++)); do
     if [[ $round -eq 1 ]]; then
         if [[ -n "$INITIAL_PROMPT" ]]; then
             echo "🔨 Dev: running initial prompt..."
-            DEV_OUTPUT=$(run_dev "$INITIAL_PROMPT")
+            DEV_OUTPUT=$(run_dev "$(build_dev_prompt "$INITIAL_PROMPT")")
         else
             echo "📥 Extracting latest dev session output..."
             echo "   💡 如果這步失敗，請加 --initial-prompt 重新啟動（詳見 KNOWN_PITFALLS.md #11）"
@@ -767,103 +867,10 @@ AMEOF
     # ── Step C: Dev continues with reviewer feedback ──
     echo "🔨 Dev ($MODEL_DEV) continuing with reviewer feedback..."
     DEV_START=$(date +%s)
-    # Build dev prompt via temp file to avoid shell expansion issues
-    QUESTIONS_FILE="$SCRIPT_DIR/questions_for_human.md"
-    DEV_PROMPT_FILE=$(mktemp /tmp/dev_prompt_XXXXXX)
 
-    # Load dev prompt: from agent/dev/prompt.md if exists, otherwise hardcoded fallback
-    _dev_prompt_content=""
-    if [[ -n "$AGENT_DIR" && -f "$AGENT_DIR/dev/prompt.md" ]]; then
-        _dev_prompt_content=$(cat "$AGENT_DIR/dev/prompt.md")
-    else
-        _dev_prompt_content='規則：
-1. 直接動手做事，不要問問題。你是 RD，寫程式是你的工作。
-2. 如果有問題只有人類能回答，把問題追加寫到 questions_for_human.md，然後繼續做你能做的部分。
-3. 每輪結束時報告：做了什麼（具體檔案/功能）、下一步打算做什麼。
-4. 停止協議：如果你確認所有剩餘工作都需要人類才能繼續，且 reviewer 也同意，在回覆中輸出 <!JOB_STOP_NOTHINGS_CAN_DO!>。不要輕易用——先想想有沒有任何能做的事。
-5. 不要為了讓測試通過而 hard-code 值。測試驗證正確性，不定義解法。如果測試本身有問題，回報而不是繞過。
-6. 如果過程中建了暫存檔（test_*.py、debug_*.sh、tmp_*），做完後刪掉。'
-    fi
+    DEV_MESSAGE=$(build_dev_prompt "以下是 AI 審查者（Reviewer）的回饋：
 
-    cat > "$DEV_PROMPT_FILE" <<DEVPROMPT_STATIC
-$_dev_prompt_content
-
-以下是 AI 審查者（Reviewer）的回饋：
-
-DEVPROMPT_STATIC
-
-    echo "$REVIEWER_RESPONSE" >> "$DEV_PROMPT_FILE"
-
-    # ── Spec path hint for dev ──
-    printf '\n規範書路徑：%s — 不確定需求細節時自己用 Read 工具去看。\n' "$SPEC_PATH" >> "$DEV_PROMPT_FILE"
-
-    # ── Dev memory injection ──
-    DEV_MEMORY_FILE="${AGENT_DIR:-$COMMS_DIR}/dev/memory.md"
-    if [[ -f "$DEV_MEMORY_FILE" ]]; then
-        mem_size=$(wc -c < "$DEV_MEMORY_FILE" | tr -d ' ')
-        if [[ $mem_size -gt 50 ]]; then  # skip if only header/placeholder
-            printf '\n---\n# 你的筆記（dev_memory.md — 只有你會看到，Reviewer 看不到）\n' >> "$DEV_PROMPT_FILE"
-            printf '重要：每輪結束前把關鍵發現寫回這個檔案（用 Bash append）。\n' >> "$DEV_PROMPT_FILE"
-            printf '記：已測過哪些頁面/功能、發現的 workaround、待修的技術債、API 行為觀察。\n' >> "$DEV_PROMPT_FILE"
-            printf '⚠️ 注意：系統只注入此檔案的最後 80 行。新內容請 append 到檔尾，不要寫在開頭。過時的筆記可以刪掉以節省空間。\n' >> "$DEV_PROMPT_FILE"
-            printf '路徑：%s\n\n' "$DEV_MEMORY_FILE" >> "$DEV_PROMPT_FILE"
-            tail -80 "$DEV_MEMORY_FILE" >> "$DEV_PROMPT_FILE"  # 最近 80 行，防 context 爆
-        fi
-    fi
-
-    # ── Todo list injection for dev ──
-    if [[ -f "$COMMS_DIR/todo.md" ]]; then
-        printf '\n---\n# 任務清單（你和 Reviewer 共用）\n做完一項用 Bash 更新狀態：echo "✅" 追加到 %s/todo.md 對應行\n\n' "$COMMS_DIR" >> "$DEV_PROMPT_FILE"
-        cat "$COMMS_DIR/todo.md" >> "$DEV_PROMPT_FILE"
-    fi
-
-    # ── Human hotline: inject human_message.md if present ──
-    HUMAN_MSG_FILE="$COMMS_DIR/human_message.md"
-    HUMAN_REPLY_FILE="$COMMS_DIR/human_reply.md"
-    if [[ -f "$HUMAN_MSG_FILE" ]]; then
-        HUMAN_MSG_CONTENT=$(cat "$HUMAN_MSG_FILE")
-        if [[ "$HUMAN_MSG_CONTENT" != *"目前沒有人類插話"* && -n "$HUMAN_MSG_CONTENT" ]]; then
-            printf '\n\n⚠️ 人類即時插話（最高優先）：\n讀完後用 Bash 把回覆寫到 %s\n\n' "$HUMAN_REPLY_FILE" >> "$DEV_PROMPT_FILE"
-            echo "$HUMAN_MSG_CONTENT" >> "$DEV_PROMPT_FILE"
-            # ── 永久記錄 human message（不給任何 agent 讀，純歷史） ──
-            printf '\n---\n[%s] Round %s\n%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$round" "$HUMAN_MSG_CONTENT" >> "$COMMS_DIR/human_message_history.log"
-            echo "📝 Human message archived to human_message_history.log"
-
-            # Loop 自動清除，dev 不需要手動清
-            echo "（目前沒有人類插話）" > "$HUMAN_MSG_FILE"
-        fi
-    fi
-
-    # ── Detail upgrade guide injection (triggered by Reviewer signal) ──
-    UPGRADE_GUIDES_DIR="$PROJECT_DIR/detail_upgrade_guides"
-    if [[ "$_INJECT_DETAIL_UPGRADE" == true ]]; then
-        _guide_count=0
-        if [[ -d "$UPGRADE_GUIDES_DIR" ]]; then
-            for _guide_file in "$UPGRADE_GUIDES_DIR"/*.md; do
-                [[ -f "$_guide_file" ]] || continue
-                _guide_name=$(basename "$_guide_file" .md)
-                printf '\n\n---\n# 📦 Detail Upgrade Guide: %s\n\n' "$_guide_name" >> "$DEV_PROMPT_FILE"
-                cat "$_guide_file" >> "$DEV_PROMPT_FILE"
-                echo "📦 Injected guide: $_guide_name"
-                ((_guide_count++))
-            done
-        fi
-        if [[ $_guide_count -eq 0 ]]; then
-            printf '\n\n---\n# 📦 Detail Upgrade — 資料夾是空的，人類尚未放入升級指南。先做你能做的打磨。\n' >> "$DEV_PROMPT_FILE"
-            echo "⚠️ No guides found in $UPGRADE_GUIDES_DIR"
-        else
-            echo "📦 Injected $_guide_count guide(s) total"
-        fi
-        _INJECT_DETAIL_UPGRADE=false
-    fi
-
-    printf '\n\n已知背景（不需要再問）：\n\n' >> "$DEV_PROMPT_FILE"
-    if [[ -f "$CONTEXT_PATH" ]]; then
-        cat "$CONTEXT_PATH" >> "$DEV_PROMPT_FILE"
-    fi
-
-    DEV_MESSAGE=$(cat "$DEV_PROMPT_FILE")
-    rm -f "$DEV_PROMPT_FILE"
+$REVIEWER_RESPONSE")
 
     DEV_LIVE_LOG="$LOG_DIR/dev_live_round${round}.log"
     > "$DEV_LIVE_LOG"  # clear
