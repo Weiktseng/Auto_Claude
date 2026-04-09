@@ -1,97 +1,192 @@
 # Auto_Claude
 
-全自動 Dev ↔ Reviewer 開發迴圈 + Claude Code 權限自動化。
+全自動 Dev ↔ Reviewer 開發迴圈引擎。兩個 AI 協作推進專案，人類睡覺。
 
-> 詳細系統架構、Prompt 組裝、權限標示 → **[ARCHITECTURE.md](ARCHITECTURE.md)**
-> 權限 5 層教學 → **[GUIDE.md](GUIDE.md)**
-
-## 30 秒看懂
+## 概念
 
 ```
-  Reviewer（審查者）          Dev（開發者）
-  ┌──────────┐              ┌──────────┐
-  │ 讀 spec  │── 回饋 ──→   │ 寫程式    │
-  │ 讀 todo  │              │ 跑測試    │
-  │ 只讀工具  │←── 結果 ──   │ 全工具    │
-  └──────────┘              └──────────┘
-       ↑                         ↑
+  Reviewer（審查者）              Dev（開發者）
+  ┌──────────┐                  ┌──────────┐
+  │ 讀 spec  │─── 回饋 ───→     │ 寫程式    │
+  │ 讀 todo  │                  │ 跑測試    │
+  │ 只讀工具  │←── 結果 ───     │ 全工具    │
+  └──────────┘                  └──────────┘
+       ↑                             ↑
   engine/loop.sh 每輪自動串接，人類可隨時插話
 ```
 
-兩個 AI 對話推進專案。Reviewer 審查 + 派任務，Dev 動手做。人類睡覺，AI 工作。
+- **Dev**：Claude `--print` 模式，擁有完整工具（Write/Edit/Bash/MCP），在目標專案目錄執行
+- **Reviewer**：Claude `--print` 模式，只有讀取工具，審查 Dev 的輸出後給回饋
+- **Curator**：每 N 輪壓縮 context，殺掉舊 session、開新 session，防止 token 爆炸
+- **人類**：隨時透過 `human_message.md` 插話，或用 `--human` 模式直接取代 Reviewer
+
+## 引擎不含任何專案
+
+這個 repo 是**純引擎**。專案配置放在各自的 `.auto_claude/` 目錄下，不在這裡。
+
+```
+Auto_Claude/          ← 你現在在這裡（引擎）
+├── engine/           ← 核心引擎
+├── templates/        ← 新專案模板
+├── tools/            ← Reviewer 用的小工具
+└── references/       ← 參考文件
+
+<你的專案>/
+└── .auto_claude/     ← 從 templates/ 複製過去，專案自治
+    ├── agent/        ← AI 的 context、prompt、記憶
+    ├── logs/         ← loop log、session index
+    └── run.sh        ← 啟動腳本
+```
 
 ## 快速開始
 
-### 用現有專案（交通部）
+### 1. 安裝引擎
 
 ```bash
-./projects/motc/run.sh --max-rounds 50
+git clone git@github.com:Weiktseng/Auto_Claude.git
 ```
 
-### 新增專案
+引擎是純 bash，不需要 `pip install`。但需要 Claude Code CLI：
 
 ```bash
-# 1. 複製模板
-cp -r templates projects/moa
-
-# 2. 改 projects/moa/run.sh 裡的 --project-dir
-# 3. 放入 spec.txt（規範書）
-# 4. 改 prompts/reviewer.prompt.md（角色 + 任務清單）
-# 5. 改 context.md（API keys + 開發規則）
-# 6. 確保目標專案有 .claude/settings.local.json
-
-# 7. 跑
-./projects/moa/run.sh --max-rounds 50
+npm install -g @anthropic-ai/claude-code
+claude login  # OAuth 登入
 ```
 
-### 常用指令
+### 2. 建立新專案
 
 ```bash
+cd /path/to/your-project
+mkdir -p .auto_claude
+cp -r /path/to/Auto_Claude/templates/* .auto_claude/
+
+# 編輯三個關鍵檔案：
+vim .auto_claude/agent/spec.txt            # 規格書（AI 的需求來源）
+vim .auto_claude/agent/context.md          # 專案背景、技術棧、注意事項
+vim .auto_claude/agent/reviewer/prompt.md  # Reviewer 的角色定義
+
+# 改 run.sh 裡的 ENGINE_REPO 路徑
+vim .auto_claude/run.sh
+```
+
+### 3. 設定權限
+
+Dev 在 `--print` 模式跑，需要預先授權工具，否則每個動作都會卡住等確認：
+
+```bash
+mkdir -p .claude
+cp /path/to/Auto_Claude/settings.local.json .claude/settings.local.json
+```
+
+### 4. 啟動
+
+```bash
+# 全自動模式（AI Reviewer ↔ AI Dev）
+.auto_claude/run.sh --initial-prompt "開始做登入功能" --max-rounds 20
+
+# 人類模式（你取代 Reviewer，直接跟 Dev 對話）
+.auto_claude/run.sh --human --initial-prompt "修復首頁的 XSS 漏洞"
+
 # 背景執行
-nohup ./projects/motc/run.sh --max-rounds 50 > projects/motc/logs/overnight.log 2>&1 &
-
-# 檢查活著沒
-cat projects/motc/logs/heartbeat
-
-# 看即時 log
-tail -f projects/motc/logs/*_loop.md
-
-# 人類插話（下一輪 dev 會讀到，讀完自動清）
-echo "先把測試補齊" > projects/motc/comms/human_message.md
-
-# 看 dev 的回覆
-cat projects/motc/comms/human_reply.md
-
-# 停止
-kill $(cat projects/motc/logs/heartbeat | python3 -c "import sys,json;print(json.load(sys.stdin)['pid'])")
+nohup .auto_claude/run.sh --initial-prompt "..." --max-rounds 50 \
+  > .auto_claude/logs/overnight.log 2>&1 &
 ```
 
-### 參數
+## 兩種模式
+
+### 全自動模式（預設）
+
+```
+Round 1: Dev 執行 initial-prompt → Reviewer 審查 → Dev 根據回饋繼續
+Round 2: Dev 輸出 → Reviewer 審查 → Dev 繼續
+...
+Round N: 雙方都發 <!JOB_STOP_NOTHINGS_CAN_DO!> → 停止
+```
+
+### 人類模式（`--human`）
+
+```
+Round 1: Dev 執行 initial-prompt → 印出 Dev 輸出 → 等你輸入指令（Ctrl+D 送出）
+Round 2: Dev 執行你的指令 → 印出結果 → 等你下一個指令
+...
+輸入 q → 退出
+```
+
+## 常用指令
+
+```bash
+# 監控
+cat .auto_claude/logs/heartbeat                    # 看跑到第幾輪
+tail -f .auto_claude/logs/dev_live_round*.log      # 即時看 Dev 輸出
+tail -f .auto_claude/logs/*_loop.md                # 完整 loop log
+
+# 人類插話（全自動模式下，不需要停 loop）
+echo "先把測試補齊" > .auto_claude/agent/comms/human_message.md
+
+# 看 Dev 對人類的回覆
+cat .auto_claude/agent/comms/human_reply.md
+
+# 停止 loop
+kill $(cat .auto_claude/logs/heartbeat | python3 -c "import sys,json;print(json.load(sys.stdin)['pid'])")
+
+# 清理殭屍進程
+/path/to/Auto_Claude/engine/cleanup.sh --kill
+```
+
+## 參數
 
 | 參數 | 預設 | 說明 |
 |------|------|------|
 | `--project-dir` | 必填 | 目標專案路徑 |
-| `--spec` | 必填 | 規範書路徑 |
-| `--prompt-template` | 必填 | Reviewer prompt 路徑 |
-| `--context` | 向後相容 | context.md 路徑 |
-| `--comms-dir` | PROJECT_DIR | 非同步溝通目錄 |
-| `--log-dir` | engine/logs | log 目錄 |
+| `--initial-prompt` | 無 | 第一輪 Dev 起始指令（新啟動必填） |
+| `--human` | false | 人類取代 Reviewer |
+| `--max-rounds` | 10 | 最大輪數 |
 | `--model-reviewer` | opus | Reviewer 模型 |
 | `--model-dev` | opus | Dev 模型 |
-| `--max-rounds` | 10 | 最大輪數 |
-| `--initial-prompt` | 無 | 第一輪 dev 起始指令 |
+| `--spec` | agent/spec.txt | 規範書路徑 |
+| `--prompt-template` | agent/reviewer/prompt.md | Reviewer prompt 路徑 |
+| `--context` | agent/context.md | context.md 路徑 |
+| `--resume-session` | 無 | 接續已有的 Dev session |
 
-## 權限自動化（settings.local.json）
+## 專案目錄結構
 
-減少 Claude Code 不必要的授權確認。實測一個 session 觸發 150+ 次提示，累積近 1 小時等待。
-
-```bash
-# 安裝到專案
-mkdir -p your-project/.claude
-cp settings.local.json your-project/.claude/settings.local.json
-# ⚠️ 重開 Claude Code session 才生效
+```
+<你的專案>/.auto_claude/
+├── run.sh                        ← 啟動腳本（指向 Auto_Claude 引擎）
+├── agent/
+│   ├── spec.txt                  ← 規格書（需求來源）
+│   ├── context.md                ← 專案背景、技術棧
+│   ├── reviewer/
+│   │   ├── prompt.md             ← Reviewer 角色定義 + 審查規則
+│   │   └── memory.md             ← Reviewer 累積記憶（自動產生）
+│   ├── dev/
+│   │   ├── prompt.md             ← Dev 規則（如何工作、何時停止）
+│   │   ├── memory.md             ← Dev 筆記（自動產生）
+│   │   └── progress.md           ← Curator 壓縮的進度摘要（自動產生）
+│   ├── curator/
+│   │   └── prompt.md             ← Curator 壓縮規則
+│   └── comms/                    ← 人類 ↔ AI 溝通管道
+│       ├── human_message.md      ← 人類寫，AI 讀（下一輪生效）
+│       ├── human_reply.md        ← Dev 寫，人類讀
+│       └── todo.md               ← 任務清單（Dev + Reviewer 共用）
+└── logs/
+    ├── *_loop.md                 ← 完整 loop log
+    ├── *_sessions.csv            ← session UUID 對照表
+    ├── dev_live_round*.log       ← Dev 即時輸出
+    └── heartbeat                 ← JSON：pid、round、時間
 ```
 
-或直接跟 Claude 說：「從 Auto_Claude/settings.local.json 複製到 .claude/settings.local.json，完成後提醒我重開 session」
+## 停止機制
 
-> 詳細的 allow/deny 規則、5 層架構、實戰案例 → **[GUIDE.md](GUIDE.md)**
+1. **雙邊停工協議**：Dev 和 Reviewer 都在回應中輸出 `<!JOB_STOP_NOTHINGS_CAN_DO!>` 才停（`--human` 模式下 Reviewer 是你，所以只有你說停才停）
+2. **最大輪數**：達到 `--max-rounds` 自動停
+3. **手動 kill**：`kill <pid>`
+
+## 其他文件
+
+| 文件 | 內容 |
+|------|------|
+| [SETUP.md](SETUP.md) | 完整安裝指南（MCP servers、全域配置） |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 系統架構、Prompt 組裝細節、角色定義 |
+| [GUIDE.md](GUIDE.md) | 權限 5 層架構教學 |
+| [KNOWN_PITFALLS.md](KNOWN_PITFALLS.md) | 已知坑和解法 |

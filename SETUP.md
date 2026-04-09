@@ -2,17 +2,28 @@
 
 ## 前置需求
 
-- macOS (tested on Darwin 23.5.0)
-- Claude Code CLI (`npm install -g @anthropic-ai/claude-code`)
+- macOS（tested on Darwin 23.5.0）或 Linux
+- Claude Code CLI >= 2.1.84
 - Claude 帳號（OAuth 登入或 API key）
+- Python 3.12+（MCP servers 需要）
+- Node.js 18+（Claude Code CLI 需要）
 
 ## 1. 引擎本身
 
 ```bash
-git clone <this-repo> Auto_Claude
+git clone git@github.com:Weiktseng/Auto_Claude.git
+cd Auto_Claude
 ```
 
-不需要安裝任何東西，引擎是純 bash。
+引擎核心是純 bash（`engine/loop.sh`），不需要 pip install。
+
+```bash
+# 安裝 Claude Code CLI
+npm install -g @anthropic-ai/claude-code
+
+# 登入（OAuth，不需要 API key）
+claude login
+```
 
 ## 2. MCP Servers（AI 的工具箱）
 
@@ -177,3 +188,48 @@ Auto_Claude/                    ← 引擎 repo（不含任何專案資料）
 ├── .mcp.json                    ← 專案級 MCP（選配）
 └── <專案程式碼>/
 ```
+
+## 7. 驗證安裝
+
+```bash
+cd /path/to/your-project
+
+# 測試 claude --print 是否能正常呼叫
+claude --print "回答 OK" --model sonnet
+
+# 用人類模式測試引擎（你當 Reviewer，1 輪就夠）
+.auto_claude/run.sh --human --max-rounds 1 \
+  --initial-prompt "列出這個專案的檔案結構"
+```
+
+看到 Dev 輸出 + `👤 你的回合` 提示就代表安裝成功。
+
+## 8. Troubleshooting
+
+### 殭屍進程累積
+
+每個 `claude` 進程會帶 2-3 個 MCP python 子進程。Interactive session 沒關會一直佔記憶體。
+
+```bash
+# 掃描殭屍（預覽，不殺）
+/path/to/Auto_Claude/engine/cleanup.sh
+
+# 確認後清理
+/path/to/Auto_Claude/engine/cleanup.sh --kill
+
+# 跳過確認直接清理
+/path/to/Auto_Claude/engine/cleanup.sh --force
+```
+
+### Loop 啟動失敗
+
+| 症狀 | 原因 | 解法 |
+|------|------|------|
+| `Loop already running` | 上次沒正常退出，lock file 殘留 | `rm .auto_claude/logs/.loop.pid` |
+| `--spec is required` | 沒有 spec.txt | 放到 `.auto_claude/agent/spec.txt` |
+| `Invalid API key` | 過期的 API key 蓋掉 OAuth | `unset ANTHROPIC_API_KEY` 或刪 `.auto_claude/.env` |
+| Dev 第一輪就停工 | `progress.md` 記錄「全部完成」 | 清空 `progress.md` 或給明確的新 initial-prompt |
+
+### claude --print 很慢
+
+`claude --print` 每次呼叫都要啟動 MCP servers（2-5 秒），加上 Opus 模型推理（1-3 分鐘），一輪 Dev+Reviewer 大約 5-10 分鐘是正常的。
