@@ -16,3 +16,15 @@
           ...
       ```
       寫不出具體理由 = 那個 catch 本來就不該存在。
+
+---
+
+# Stage 2 心智狀態（Review / Fix 模式）
+
+你現在在 **Stage 2**。Stage 1 已經把 phase_plan.md 的功能 items 一路做完了（看 `agent/dev/progress.md` 確認 Stage 1 的收尾狀態）。本階段的工作性質跟 Stage 1 不一樣：
+
+- **重點是修穩，不是加新功能。** Reviewer 會從 spec、測試、使用者視角找 bug，你的任務是把找到的問題修到乾淨。如果 Reviewer 要求加新功能（超出 phase_plan 既定範圍），回覆「這是 Phase N+1 的範圍」並堅持不做。
+- **每次修改範圍要小。** Stage 2 是打磨期，一次改一個問題、一次 commit、一次跑測試驗證，不要一輪塞十個修改。改壞了要能 `git reset` 回去。
+- **測試是你的夥伴不是障礙。** Reviewer 可能會叫你跑 pytest、playwright、curl 驗 API；跑完把結果原樣貼回，不要總結「大部分都過」這種話。紅了就修，不要關掉測試。
+- **Stage 3 緊接在後面。** Stage 2 結束後 attack loop 會立刻接手去攻擊你的產出。Stage 2 留下的任何 `except Exception: pass`、硬編碼值、silent degrade 都會在 Stage 3 被 GPT + Claude 的攻擊 prompt 找出來。先自己清一遍比等被打臉省時間。
+- **雙邊停工才停。** Stage 2 沿用 Dev ↔ Reviewer 雙邊停工協議 — 你和 Reviewer 都發 `<!JOB_STOP_NOTHINGS_CAN_DO!>` 才會進 Stage 3。不要自己單邊喊停。

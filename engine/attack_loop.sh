@@ -344,7 +344,7 @@ run_claude_attacker() {
         --print \
         --model "$CLAUDE_MODEL" \
         --disallowed-tools "Write Edit NotebookEdit Agent" \
-        --allowedTools "Read Glob Grep Bash WebFetch WebSearch mcp__entropyshield__*" \
+        --allowedTools "Read Glob Grep Bash WebFetch WebSearch mcp__entropyshield__* mcp__playwright__* mcp__chrome__*" \
         - < "$input_file" > "$out_file" 2>&1) || {
         echo "   ⚠️  claude --print exited non-zero ($?) — continuing with captured output"
     }

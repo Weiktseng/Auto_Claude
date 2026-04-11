@@ -655,10 +655,18 @@ build_dev_prompt() {
     local _prompt_file
     _prompt_file=$(mktemp /tmp/dev_prompt_XXXXXX)
 
-    # Load dev prompt rules
+    # Load dev prompt rules — prefer stage2_prompt.md (new), fall back to prompt.md (legacy)
     local _dev_prompt_content=""
-    if [[ -n "$AGENT_DIR" && -f "$AGENT_DIR/dev/prompt.md" ]]; then
-        _dev_prompt_content=$(cat "$AGENT_DIR/dev/prompt.md")
+    local _dev_prompt_file=""
+    if [[ -n "$AGENT_DIR" ]]; then
+        if [[ -f "$AGENT_DIR/dev/stage2_prompt.md" ]]; then
+            _dev_prompt_file="$AGENT_DIR/dev/stage2_prompt.md"
+        elif [[ -f "$AGENT_DIR/dev/prompt.md" ]]; then
+            _dev_prompt_file="$AGENT_DIR/dev/prompt.md"
+        fi
+    fi
+    if [[ -n "$_dev_prompt_file" ]]; then
+        _dev_prompt_content=$(cat "$_dev_prompt_file")
     else
         _dev_prompt_content='規則：
 1. 直接動手做事，不要問問題。你是 RD，寫程式是你的工作。
