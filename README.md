@@ -186,7 +186,72 @@ kill $(cat .auto_claude/logs/heartbeat | python3 -c "import sys,json;print(json.
 
 | 文件 | 內容 |
 |------|------|
-| [SETUP.md](SETUP.md) | 完整安裝指南（MCP servers、全域配置） |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 系統架構、Prompt 組裝細節、角色定義 |
+| [SETUP.md](SETUP.md) | 完整安裝指南（MCP servers、全域配置、Phase 切分分析） |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 系統架構、Prompt 組裝、三層抓 bug 機制 |
 | [GUIDE.md](GUIDE.md) | 權限 5 層架構教學 |
 | [KNOWN_PITFALLS.md](KNOWN_PITFALLS.md) | 已知坑和解法 |
+
+---
+
+## 開發歷程（公開時間戳證明）
+
+本 repo 所有時間戳可在 `git log --format="%h %ai %s"` 驗證。以下是核心里程碑：
+
+| 日期（git `%ai` 原值） | 里程碑 | Commit |
+|---|---|---|
+| 2026-03-13 14:42:14 +0800 | Repo init（權限底座） | [`819c0bd`](../../commit/819c0bd) |
+| **2026-03-16 19:53:32 +0800** | **首版 Dev ↔ Reviewer 自動化迴圈落地** | [**`a7c923b`**](../../commit/a7c923b) |
+| 2026-03-21 19:34:08 +0800 | engine/projects/templates 架構拆分 | [`f595905`](../../commit/f595905) |
+| **2026-03-24 02:41:01 +0800** | **`.auto_claude/` 專案自治 + `human_message.md` 非同步 HITL 落地** | [**`738b673`**](../../commit/738b673) |
+| 2026-04-11 | Except 反模式 hook + Phase 切分指引 + 三層防禦文件 | `834e0e3` |
+
+## 與其他多 agent 框架的 HITL 設計比較
+
+本節記錄 Auto_Claude 與 **AutoGen（Microsoft）** 在 **Human-in-the-Loop（HITL）** 設計上的根本差異。Auto_Claude 的非同步檔案式 HITL 於 **2026-03-24 commit `738b673`** 進入 repo，比本文撰寫時（2026-04-11）在公開來源看到的任何同類方案都早。兩套設計解的是不同問題，列此僅為釐清技術定位，不代表其中一方優劣。
+
+### AutoGen `UserProxyAgent`（同步阻塞 HITL）
+
+直接引用 Microsoft 官方文件（[autogen human-in-the-loop docs](https://microsoft.github.io/autogen/stable/user-guide/agentchat-user-guide/tutorial/human-in-the-loop.html)，2026-04-11 查核）：
+
+> "When UserProxyAgent is called during a run, **it blocks the execution of the team until the user provides feedback or errors out.**"
+>
+> "This will **hold up the team's progress and put the team in an unstable state that cannot be saved or resumed.**"
+>
+> 官方建議僅用於 "short interactions that require immediate feedback from the user, such as asking for approval or disapproval with a button click."
+
+特性：
+- 預設從 **stdin** 讀（`input_func=input`），可客製成 websocket
+- 人類必須**同步在線**；不在線整個 team 卡住
+- 執行中的 team **無法 save/resume**（官方警告）
+- 官方明確說適用場景是**短互動**（如按鈕確認）
+
+### Auto_Claude `comms/human_message.md`（非同步檔案 HITL）
+
+- 人類在**任何時候**用任何編輯器寫入 `comms/human_message.md`（或完全不寫）
+- `loop.sh` 每輪開頭讀一次：若非預設值就注入到該輪 Dev prompt、歸檔到 `human_message_history.log`、清空回預設
+- Loop **從不為了等人類而阻塞**——人類 3 小時不回，loop 就跑 3 小時的自主開發；3 天不回，就 3 天
+- 歷史自動追蹤在 `human_message_history.log`，附每筆的時間戳和當時的 round 編號
+- 設計目的：**長時間無人值守自主迴圈**（整夜跑、週末跑、人類偶爾檢查）
+
+### 對照表
+
+| 維度 | AutoGen `UserProxyAgent` | Auto_Claude `human_message.md` |
+|---|---|---|
+| 輸入機制 | stdin / 客製 websocket | 檔案系統（vim / echo / 任何編輯器） |
+| 執行模式 | **同步阻塞** | **非同步非阻塞** |
+| 人類必須在線？ | 是 | 否 |
+| Team/loop 可否 save/resume？ | 阻塞時官方警告「無法」 | 一律可以（每輪間無跨輪狀態） |
+| 適用情境 | 短互動、即時決策、approval click | 長時間自主、偶爾介入、整夜跑 |
+| 歷史追蹤 | 需客製實作 | 自動 append 到 `human_message_history.log` |
+| 人類「插話」後的 AI 反應 | 阻塞結束後直接接收 | 下一輪開頭看到，視為最高優先指令 |
+| 首次 commit | 早於 2026-04 | 2026-03-24 `738b673` |
+
+### 為什麼差別重要
+
+AutoGen 的同步模式在**互動式開發**（開發者坐在終端前即時指導 agent）很合理。Auto_Claude 的非同步模式在**無人值守長時間自主開發**（這正是 Auto_Claude 被設計的場景——人類交代任務後去睡覺/上班，早上回來看進度）才會 shine。
+
+兩個設計反映兩種不同的 human-AI 協作哲學：
+- **AutoGen**：AI 是助手，人類是主控，隨時在場
+- **Auto_Claude**：AI 是值班工程師，人類是主管，定期 check-in
+
+因此 `human_message.md` 的 design 核心不是「讓人類講話」，而是「**讓人類在場和不在場都不影響 AI 產出速度**」。這個不對稱性是 AutoGen 同步模式無法提供的。
