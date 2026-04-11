@@ -173,6 +173,7 @@ user prompt = spec + todo + 動態     user prompt = reviewer 回饋 + todo + �
 ```
 Round N:
   ├── 寫 heartbeat（JSON：pid, round, time, log path）
+  ├── 捕捉 git HEAD SHA → _round_start_sha（供 post-dev hook 用）
   │
   ├── Step A: 取得 dev 輸出
   │     ├── Round 1: 跑 initial-prompt 或 extract_session.py
@@ -181,6 +182,13 @@ Round N:
   ├── Guards
   │     ├── Rate limit → 自動等待重置時間
   │     └── 空輸出（<10 chars）→ 等 30s 重試
+  │
+  ├── 🛡️ Post-Dev hook：check_except_patterns.py
+  │     ├── git diff _round_start_sha..HEAD -- '*.py'
+  │     ├── 抓 bare except: / except Exception: pass|return None|[]|{}
+  │     ├── 檢查 # except-ok: 註解放行
+  │     └── 有違規 → 寫 logs/except_violations_latest.txt
+  │                → build_dev_prompt 下一輪會 prepend 進 Dev prompt
   │
   ├── Step B: Reviewer 審查（run_reviewer）
   │     ├── 注入：spec + dev 輸出 + human_message + human_reply
@@ -360,6 +368,121 @@ Dev 跑久了 context 會滿，品質下降：
 
 ---
 
+## 三層抓 bug 機制
+
+Auto_Claude 用**三種不同性質**的方式抓開發過程中的錯誤。看懂這三層的分工，才能判斷「某個類型的 bug 該靠哪一層擋」、「為什麼某些錯會溜到使用者面前」。
+
+```
+Layer 1：AI 主觀判斷          Layer 2：機率性失敗            Layer 3：死代碼閘門
+─────────────────            ─────────────────              ─────────────────
+Reviewer 指派 probe           Dev 習慣性 try/except         git diff regex 掃描
+Dev 扮演使用者走查             Dev 提早宣告「都做完了」         .loop.pid 檔案鎖
+Reviewer catch scope creep   Dev 挑測試重跑而非全跑           Rate limit 偵測 + 自動等待
+Curator 壓縮判斷              Dev 寫 stub dict 假裝成功       空輸出 retry
+                             memory 蓋過新 spec              check_except_patterns.py（新）
+                                                           settings.local.json deny 清單
+
+抓得到「語意、UX、設計」      造成「靜默降級、殘渣累積」       抓得到「模式明確的錯」
+抓不到「模式明確的錯」         抓不到「這些自己會發生」         抓不到「語意、意圖」
+```
+
+### Layer 1：靠 AI 判斷（做得很好的事）
+
+這些工作**需要理解語意、使用情境、業務邏輯**，死代碼做不來，人類做又太慢。AI 在這層是真正的主力。
+
+| 能力 | 實例（來自 perma_ai 41 輪實測） | 為什麼 AI 適合 |
+|------|--------|---------|
+| **Reviewer 指派 probe 測試** | Round 6、13、27、31、33、39 共 6 輪「去戳 X 會怎樣」的探索性測試，抓到 Playwright smoke 全綠但資料一致性有 bug（R31 silent row loss） | 需要問「如果 Y 呢？」這種開放式假設 |
+| **Dev 扮演使用者走查** | Round 6 扮演心理系老師，跑一整輪真 UX（改 prompt → compare → 存 fixture → replay → 看 diff → deploy），一次找到 14 個痛點（header 寫死 Phase 1、compare 沒 diff 著色、draft 沒版本化⋯） | 需要「我是使用者我會怎麼想」的角色帶入 |
+| **Reviewer 擋 scope creep** | Round 12 Dev 想在 fixture modal 加 tag/category，Reviewer 擋下「最小化」；Round 26 Dev 想自決 auth 範圍，Reviewer 要求「先問人類」 | 需要判斷「這個改動跟本次任務是否相關」 |
+| **Feature 誤解抓取** | Round 7 Reviewer 發現 Dev 對「deploy 語意」理解錯（名字騙人：只寫 DB 不實際部署） | 需要語意理解 |
+| **Curator 壓縮判斷** | 每 N 輪 sonnet 決定什麼留、什麼丟（commit hash 留、客套話丟、已完成的「下一步」丟） | 需要判斷「這資訊未來還有用嗎」 |
+| **Dev 跨模組重構** | 新增一個 diff UI 時 Dev 自動把 backend API、DB schema、前端 handler、smoke 測試一起改 | 需要理解 intent 和跨檔案依賴 |
+
+**這層的成功關鍵**：Reviewer 有足夠的「反對權」(veto)，且 loop 允許它打回 Dev 重做。如果 Reviewer 只是蓋章，這層就垮了。
+
+**這層的失敗模式**：如果 AI 同時扮 Dev 和 Reviewer 又在同一個 session，沒有「來自外部的不同意見」，就會自我強化而退化。Auto_Claude 的解法是**每輪 Reviewer 用 `--print` 新開無狀態 session**，強制對 Dev 的輸出做外部視角的審查。
+
+### Layer 2：AI 的機率性失敗（需要 Layer 3 擋）
+
+這些是**AI 訓練資料本身的習慣性偏誤**，靠提醒 Dev「小心」是沒用的，因為它每次都會「忘記」。必須用死代碼物理攔截。
+
+| 失敗模式 | 實例 | 為什麼 AI 不會自己改 |
+|---------|------|--------|
+| **Try/except 吞錯變成靜默降級** | R31：`_replay_one` 拋 exception → 外層 try 塞 stub dict 進 results → response 回 `total:15, changed:14`，少算的那筆完全看不到 | 訓練資料裡「production robust code」都長這樣，Dev 以為自己在做 defensive programming，實際在做 evidence deletion |
+| **提早宣告「都做完了」** | 進度 compression 寫「12/12 全數完成」時，Dev 第一輪就會回「沒什麼可做」然後停工，即使有新 human_message 也會被既有的「已完成」氣氛蓋掉 | Dev 信任 progress.md > 新指令，因為 session memory 被重置後 progress.md 是唯一可信錨點 |
+| **挑測試重跑而非全跑** | 早期幾輪 Dev 只跑「鄰近 smoke」而非全套，直到一次 server 掛住才改成每輪跑全套 | 效能壓力下會自動退化，除非 loop 強制 |
+| **Role/檔案誤用** | R9：Dev 把「給人類的問題」寫進 `human_message.md`（人類 → AI 單向通道），loop 下一輪把它當真人插話注入回去，造成自言自語 | 看到多個類似檔名時憑感覺挑一個，沒有強規則就會錯 |
+| **舊 spec 殘渣不清** | 新 spec 抽換後，Dev 不會主動 `DROP TABLE` 或刪除孤兒 endpoint——它的心智模型是「已存在 = 有人要用」，沒有反向推論「沒在 spec 裡 = 該刪」 | 訓練資料裡「刪 production code」的樣本極少 |
+| **memory 蓋過新 spec** | Dev 在 `dev_memory.md` 寫過的舊決策，讀起來比每輪重讀 spec 更快；模糊地帶會傾向信 memory | Context 成本考量下，memory 是捷徑 |
+| **Reviewer 蓋章而非審查** | Reviewer 偶爾回「ok 繼續」只有 20 字就收工，該輪等於沒審 | 低能量回應比實質回應便宜 |
+
+**這層的 bug 共同特徵**：**每次都不完全一樣**（所以不能寫死 regex）、**AI 會以合理理由辯護**（所以不能靠 Reviewer 講道理）、**只能用「外部強制」擋**。這就是 Layer 3 的職責。
+
+### Layer 3：死代碼閘門（100% deterministic）
+
+這層**完全不用 AI 判斷**，只用 regex、檔案存在性、HTTP status code、整數比較這類**二值結果**。無法被 AI 辯論繞過，也沒有機率性。代價是只能擋「模式明確」的錯，擋不了「語意」的錯。
+
+| 閘門 | 位置 | 擋什麼 | 觸發時行為 |
+|------|------|--------|-----------|
+| **`.loop.pid` 檔案鎖** | `engine/loop.sh` | 同專案啟兩個 loop | 第二個啟動時檢查 pid 檔，存在就拒啟 |
+| **Rate limit regex** | `engine/loop.sh` guards | Dev/Reviewer 輸出含 rate limit 字樣 | 解析重置時間，sleep 到重置 +60s |
+| **空輸出偵測** | `engine/loop.sh` guards | Dev 回傳 <10 chars（cache race） | `sleep 5` 後 round-- 重試 |
+| **Heartbeat JSON** | `engine/loop.sh` | 不是擋，是監控 | 每輪覆寫 `{pid, round, max, time, log, sessions}` 讓外部工具判斷 loop 是否還活 |
+| **Curator 固定週期** | `engine/loop.sh` | Dev context rot | 每 N 輪強制壓縮 + 換 session，不管 Dev 覺得需不需要 |
+| **`check_except_patterns.py`（新）** | `engine/check_except_patterns.py` + `loop.sh` build_dev_prompt | Layer 2 的 try/except 吞錯 | 掃 git diff 抓 `except:`、`except Exception: pass/return None/[]/{}` 等 pattern；有違規把報告塞進下一輪 Dev prompt 強制先修 |
+| **`# except-ok:` 放行機制** | 同上 | Layer 3 的誤傷（合法 catch） | Dev 在 `except` 上方 3 行內加 `# except-ok: <具體理由>`，regex 放行。寫不出具體理由 = 該 catch 本來就不該存在 |
+| **Settings deny 清單** | `.claude/settings.local.json` | 破壞性指令 | `rm -rf /`、`sudo *`、`git push --force`、`git reset --hard` 一律拒絕 |
+| **Playwright DOM 斷言** | 專案的 `smoke_*.py` | 前端元素存在、可點、資料正確 | selector 找不到或 assertion fail 就 exit 非 0 |
+| **HTTP status 檢查** | 同上 | API 5xx | smoke 裡 `assert resp.status_code < 500` |
+
+**新增 except hook 的運作細節：**
+
+```
+Round N:
+  ├── 捕捉 HEAD SHA → _round_start_sha
+  ├── Step A: Dev 跑，寫程式、commit
+  ├── check_except_patterns.py --since _round_start_sha
+  │     ├── git diff HEAD~1..HEAD --unified=5 -- '*.py'
+  │     ├── parse +行，套 regex 黑名單
+  │     ├── 檢查 except 上方 3 行是否有 `# except-ok:`
+  │     └── 有違規 → 寫 logs/except_violations_latest.txt
+  ├── Step B: Reviewer 審查
+  └── Step C: build_dev_prompt
+        └── 發現 except_violations_latest.txt → prepend 到 Dev prompt
+              → Dev 下一輪第一件事就是看到違規列表被迫先修
+```
+
+**為什麼這層重要：** Layer 1 的 AI 判斷是**非同質且有成本**的——Reviewer 可能這輪心情好抓到，下輪心情不好就漏。Layer 3 是**同質且零成本**的——每輪一定跑、一定用同一套 regex、結果一定可重現。兩層互補：Layer 1 抓「這個設計不對」，Layer 3 抓「這行程式碼有明確反模式」。
+
+### 三層對照表：哪種 bug 該靠哪層擋
+
+| Bug 類型 | 最有效的層 | 為什麼 |
+|---------|------|------|
+| Syntax error、import error | Layer 3（smoke 啟動失敗即可見） | 模式明確 |
+| Feature 誤解規格 | Layer 1（Reviewer 讀 spec 比對 Dev 輸出） | 需要語意理解 |
+| UX 卡點 / 使用不順 | Layer 1（Dev 扮演使用者走查） | 需要情境帶入 |
+| 邏輯 bug（功能做錯） | Layer 1 + Layer 3（probe 找 → smoke 鎖） | AI 探索 + 死碼防退化 |
+| Silent swallow（R31 類） | **Layer 3**（新 except hook） | Layer 2 自己會製造它，Layer 1 很難看出「少了什麼」 |
+| Regression（舊功能壞掉） | Layer 3（全套 smoke 每輪跑） | 模式明確 |
+| Scope creep | Layer 1（Reviewer 判斷相關性） | 需要判斷意圖 |
+| 舊 spec 殘渣 / DB 欄位 bloat | **目前沒人擋**（Layer 2 問題，Layer 3 做不到，Layer 1 需要人類 triage） | 需要 spec 抽換後的 alignment audit round |
+| Rate limit | Layer 3（regex 偵測 + 自動等待） | 模式明確 |
+| Context rot（Dev 失憶） | Layer 3（Curator 固定週期） | 不能等 Dev 自己發現 |
+
+### 解釋給其他人時可以這樣說
+
+> Auto_Claude 把「找 bug」這件事拆成三層：
+> **第一層靠 AI 判斷**——Reviewer 和 Dev 互相審，Dev 會扮演使用者走查，抓語意和 UX 問題。這層能發現「這個功能其實心理系用不順」這種只有真人會發現的事。
+>
+> **第二層是 AI 的機率性失敗**——AI 會習慣性地寫 `try/except: pass` 把錯誤藏起來、會提早說「都做完了」、會在 spec 換版後留下一堆殘渣。講道理沒用，因為它下一輪又會忘記。
+>
+> **第三層是死代碼閘門**——用 regex、檔案鎖、HTTP status code 這種 100% 確定的方式擋第二層的毛病。我們有個 `check_except_patterns.py` 每輪掃 git diff，看到 Dev 新加的 `except Exception: pass` 就打回去強制修，除非它寫 `# except-ok: <具體理由>` 證明這個 catch 是必要的。
+>
+> 三層互補：Layer 1 管語意、Layer 3 管模式、Layer 2 是問題本身。Layer 3 越完整，Layer 1 越能專心做語意判斷不用一直盯 Dev 的手。
+
+---
+
 ## 已知限制
 
 1. **Bash for loop 記憶體模型**：loop.sh 跑起來後，整個 for 迴圈已載入記憶體。改 loop.sh 不會影響正在跑的 process，必須 kill 再重啟
@@ -379,7 +502,7 @@ Dev 跑久了 context 會滿，品質下降：
 | Reviewer | ~20K-40K tokens | ~200-500 tokens |
 | Curator（每 8 輪） | ~5K-15K tokens | ~1K-3K tokens |
 
-50 輪 opus 跑一晚約 $50-150 USD，視 dev 輸出長度和工具呼叫次數而定。
+50 輪 opus 跑一晚約 $50-150 USD，視 dev 輸出長度和工具呼叫次數而定。然而實際上是由max plan 支付claude -print
 
 ---
 

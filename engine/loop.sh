@@ -698,6 +698,17 @@ DEVPROMPT_STATIC
         cat "$COMMS_DIR/todo.md" >> "$_prompt_file"
     fi
 
+    # ── Except-hook findings (post-dev anti-pattern scan) ──
+    local _except_file="$LOG_DIR/except_violations_latest.txt"
+    if [[ -s "$_except_file" ]]; then
+        printf '\n\n---\n# ⚠️ 上一輪你新增的 except 區塊違反規則（loop hook 自動掃描）\n' >> "$_prompt_file"
+        printf '這些 pattern 會讓失敗靜默降級成「看起來 OK 的 DB 狀態」，defeat 所有測試閘門。\n' >> "$_prompt_file"
+        printf '請本輪先修完下列項目再繼續新工作：\n\n' >> "$_prompt_file"
+        cat "$_except_file" >> "$_prompt_file"
+        printf '\n' >> "$_prompt_file"
+        rm -f "$_except_file"
+    fi
+
     # ── Human hotline: inject human_message.md if present ──
     local _hmsg_file="$COMMS_DIR/human_message.md"
     local _hreply_file="$COMMS_DIR/human_reply.md"
@@ -758,6 +769,9 @@ for ((round=1; round<=MAX_ROUNDS; round++)); do
     printf '{"pid":%d,"round":%d,"max":%d,"time":"%s","log":"%s","sessions":"%s"}\n' \
         $$ $round $MAX_ROUNDS "$(date +"%Y-%m-%d %H:%M:%S")" "$LOOP_LOG" "$SESSION_CSV" > "$HEARTBEAT_FILE"
 
+    # Mark HEAD before Dev runs so post-dev hooks can diff this round's changes
+    _round_start_sha=$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo "")
+
     # ── Step A: Get dev output ──
     # ⚠️ KNOWN PITFALL #11: Round 1 的兩種模式
     #    有 --initial-prompt → 直接餵 Dev，適合新啟動（大部分場景）
@@ -814,6 +828,18 @@ ${DEV_OUTPUT}"
 $DEV_OUTPUT
 
 EOF
+
+    # ── Post-Dev hook: scan for exception anti-patterns in this round's diff ──
+    _except_violations="$LOG_DIR/except_violations_latest.txt"
+    if [[ -x "$SCRIPT_DIR/check_except_patterns.py" ]]; then
+        if python3 "$SCRIPT_DIR/check_except_patterns.py" \
+                "$PROJECT_DIR" --since "$_round_start_sha" > "$_except_violations" 2>&1; then
+            rm -f "$_except_violations"
+        else
+            _viol_count=$(grep -c '\[silent_swallow\]\|\[bare_except\]' "$_except_violations" 2>/dev/null || echo 0)
+            echo "⚠️  except-hook: $_viol_count anti-pattern(s) flagged — will inject into next Dev prompt"
+        fi
+    fi
 
     # ── Step B: Reviewer reviews ──
     REVIEWER_START=$(date +%s)

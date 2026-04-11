@@ -29,7 +29,7 @@ claude login
 
 MCP server 是 Claude Code 的外掛工具。安裝在你的電腦上，所有專案共用。
 
-### 必裝
+### 建議安裝
 
 | Server | 用途 | 安裝 |
 |--------|------|------|
@@ -41,7 +41,7 @@ git clone git@github.com:Weiktseng/EntropyShield.git
 cd EntropyShield && pip install -e .
 ```
 
-### 建議安裝
+### 必裝
 
 | Server | 用途 | 安裝 |
 |--------|------|------|
@@ -58,7 +58,7 @@ git clone git@github.com:Weiktseng/Auto_Claude_chrome-mcp-bridge.git chrome-mcp-
 git clone git@github.com:Weiktseng/Claude_Destope_cron_manager.git cron-manager
 ```
 
-### 選配（公開套件）
+### 必配（公開套件）
 
 ```bash
 # Playwright MCP — headless 瀏覽器自動化
@@ -126,7 +126,7 @@ cp -r <Auto_Claude>/templates/* .auto_claude/
 
 # 編輯設定
 vim .auto_claude/agent/spec.txt          # 貼上你的規格書
-vim .auto_claude/agent/context.md        # 填專案背景
+vim .auto_claude/agent/context.md        # 填專案背景 + Phase 切分（見 5.5）
 vim .auto_claude/agent/reviewer/prompt.md  # 自訂 reviewer 角色
 
 # 修改 run.sh 裡的路徑
@@ -135,6 +135,57 @@ vim .auto_claude/run.sh
 # 啟動
 .auto_claude/run.sh --initial-prompt "開始做登入功能" --max-rounds 20
 ```
+
+## 5.5 Spec Phase 切分分析（長 spec 必做，30 分鐘人類工作）
+
+**拿到 >1000 行的外部規格書時，不要直接丟給 Dev 開始做。** 先做 Phase 切分。
+
+### 為什麼要切
+
+長 spec 造成三種明確問題：
+
+1. **Context 壓力** — Dev 每輪讀 spec、Curator 每 N 輪壓縮、Reviewer 也吃 spec，長 spec = 全流程都貴且容易 context rot
+2. **注意力分散** — Dev 讀到推播章節會開始認真想 APNs，即使手機殼 demo 根本還沒做；讀到多語系會順手寫 i18n placeholder
+3. **後期殘渣** — Dev 做 §4 一半發現要等 §3 才能測，scaffold 留在 code 裡變死程式碼，之後沒人敢刪（見 ARCHITECTURE.md「Layer 2 機率性失敗：舊 spec 殘渣不清」）
+
+### 切分步驟（人類執行）
+
+1. **通讀 spec，列所有章節**：`grep '^##' .auto_claude/agent/spec.txt`
+2. **標記 demo-critical**：能 demo 給客戶看的**最小端對端路徑**要哪幾節？（使用者打開 → 做核心動作 → 看到結果 → 完成）
+3. **劃 Phase 1 = demo-critical minimum**：能跑、能展示、客戶看得懂的最小集。**通常只佔全 spec 的 20–40%**。
+4. **其他章節歸 Phase 2+**，標註每一節「依賴 Phase 1 的哪些 API / schema」
+5. **驗證 phase 隔離**：Phase 2+ 的每一節回答三個問題：
+   - 它要**修改** Phase 1 的哪個 DB schema？**答案必須是「無」**，只能 append 新表/新欄位
+   - 它要**修改** Phase 1 的哪個 API 契約？**答案必須是「無」**，只能加新 endpoint
+   - 它要**修改** Phase 1 的哪個核心函數行為？**答案必須是「無」**，只能寫 wrapper
+6. **任何「是」→ Phase 1 畫錯了**。那塊 Phase 1 功能還沒成熟就被塞進去、或 Phase 2 依賴了尚未穩定的介面。**重畫 Phase 1 邊界**，把那塊挪到 Phase 2 一起做，或擴大 Phase 1 把依賴也納入。
+
+### 把結果寫進 `agent/context.md`（不要改 spec.txt）
+
+```markdown
+# 開發範圍（本階段限定，Dev 每輪都看到）
+
+**Phase 1 只做**：§5 AI 對話引擎、§13 prompt 工程、§14 測試、§15 成本、§18 控制台
+**Phase 1 禁碰**：§3 Capacitor 原生殼、§4 推播、§6 記憶 agent、§8 週間關懷、§10 多媒體、§12 多語系
+
+**禁碰章節的處理規則**：
+- Dev 讀 spec 看到禁碰章節，**跳過不實作、不留 stub、不留 placeholder、不留 TODO 註解**
+- 若 Phase 1 功能「需要」禁碰章節的東西才能跑，用最簡單的 hardcoded fallback，並加 `# phase-2: <章節編號>` 註解
+- 禁止為了 Phase 2 預先鋪路而改 Phase 1 的 schema 或 API 設計
+```
+
+### 為什麼不直接改 spec.txt
+
+spec.txt 是客戶/PM 的原始契約，之後會被引用、對照、審計、交接。**Phase 切分是 RD 策略決定，屬於 context 不屬於 spec**。改 spec.txt 會讓原始契約失真，之後沒人分得清哪些是客戶要的、哪些是 RD 自己劃的範圍。
+
+### 常見陷阱
+
+- ❌ **把 "nice to have" 塞 Phase 1 因為「順便做」** — Phase 1 不會因為多做而變快，只會變脆
+- ❌ **Phase 切分後才發現 Phase 2 需要動 Phase 1 核心** — 代表原切分錯，立刻重切，不要硬幹
+- ❌ **跑到一半才想換 spec 版本** — 會留殘渣（舊 DB 表、孤兒 endpoint、過時 smoke 測試），應該先在新 loop 開一個 audit round 清完再換
+- ❌ **不切 phase 直接開跑** — Dev 會在 spec 章節之間亂跳，context 很快就飽和，且 Curator 壓縮後無法判斷哪些是主線、哪些是支線殘渣
+- ❌ **Phase 2+ 預先 mock 進 Phase 1** — 看起來「之後接上就好」，實際上 mock 的 interface 一定跟最後真實的不一樣，Phase 2 要來時還是要改 Phase 1
+
 
 ## 6. 權限設定
 
