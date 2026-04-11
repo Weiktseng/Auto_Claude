@@ -200,14 +200,14 @@ kill $(cat .auto_claude/logs/heartbeat | python3 -c "import sys,json;print(json.
 | 日期（git `%ai` 原值） | 里程碑 | Commit |
 |---|---|---|
 | 2026-03-13 14:42:14 +0800 | Repo init（權限底座） | [`819c0bd`](../../commit/819c0bd) |
-| **2026-03-16 19:53:32 +0800** | **首版 Dev ↔ Reviewer 自動化迴圈落地** | [**`a7c923b`**](../../commit/a7c923b) |
-| 2026-03-21 19:34:08 +0800 | engine/projects/templates 架構拆分 | [`f595905`](../../commit/f595905) |
-| **2026-03-24 02:41:01 +0800** | **`.auto_claude/` 專案自治 + `human_message.md` 非同步 HITL 落地** | [**`738b673`**](../../commit/738b673) |
+| **2026-03-16 19:53:32 +0800** | **首版 Dev ↔ Reviewer 自動化迴圈** + 檔案式 async 通訊 pattern（`questions_for_human.md` Dev→人類單向） | [**`a7c923b`**](../../commit/a7c923b) |
+| **2026-03-21 19:34:08 +0800** | **`comms/human_message.md` + `human_reply.md` 完整非同步雙向 mid-loop HITL 落地**（同一 commit 也做了 engine/projects/templates 架構拆分） | [**`f595905`**](../../commit/f595905) |
+| 2026-03-24 02:41:01 +0800 | `.auto_claude/` 專案自治 + `human_message_history.log` 自動歸檔 + reviewer timeout | [`738b673`](../../commit/738b673) |
 | 2026-04-11 | Except 反模式 hook + Phase 切分指引 + 三層防禦文件 | `834e0e3` |
 
 ## 與其他多 agent 框架的 HITL 設計比較
 
-本節記錄 Auto_Claude 與 **AutoGen（Microsoft）** 在 **Human-in-the-Loop（HITL）** 設計上的根本差異。Auto_Claude 的非同步檔案式 HITL 於 **2026-03-24 commit `738b673`** 進入 repo，比本文撰寫時（2026-04-11）在公開來源看到的任何同類方案都早。兩套設計解的是不同問題，列此僅為釐清技術定位，不代表其中一方優劣。
+本節記錄 Auto_Claude 與 **AutoGen（Microsoft）** 在 **Human-in-the-Loop（HITL）** 設計上的根本差異。Auto_Claude 的檔案式 async 通訊 pattern 於 **2026-03-16 commit `a7c923b`**（首版 loop.sh 就有 `questions_for_human.md` Dev→人類單向訊息）落地，完整的 **人類↔AI 非同步雙向 mid-loop HITL**（`comms/human_message.md` + `human_reply.md`）於 **2026-03-21 commit `f595905`** 進入 repo。兩套設計解的是不同問題，列此僅為釐清技術定位，不代表其中一方優劣。
 
 ### AutoGen `UserProxyAgent`（同步阻塞 HITL）
 
@@ -244,7 +244,7 @@ kill $(cat .auto_claude/logs/heartbeat | python3 -c "import sys,json;print(json.
 | 適用情境 | 短互動、即時決策、approval click | 長時間自主、偶爾介入、整夜跑 |
 | 歷史追蹤 | 需客製實作 | 自動 append 到 `human_message_history.log` |
 | 人類「插話」後的 AI 反應 | 阻塞結束後直接接收 | 下一輪開頭看到，視為最高優先指令 |
-| 首次 commit | 早於 2026-04 | 2026-03-24 `738b673` |
+| 首次 commit | 早於 2026-04 | 檔案式 async pattern 2026-03-16 `a7c923b`；雙向 mid-loop HITL 2026-03-21 `f595905` |
 
 ### 為什麼差別重要
 
