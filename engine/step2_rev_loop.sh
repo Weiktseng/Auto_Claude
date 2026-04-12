@@ -26,7 +26,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOOP_SH="$SCRIPT_DIR/loop.sh"
-ATTACK_SH="$SCRIPT_DIR/attack_loop.sh"
+ATTACK_SH="$SCRIPT_DIR/attack_loop_v2.sh"
 
 [[ ! -x "$LOOP_SH" ]] && { echo "Error: $LOOP_SH not executable" >&2; exit 1; }
 
