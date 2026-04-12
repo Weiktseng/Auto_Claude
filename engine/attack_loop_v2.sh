@@ -289,12 +289,11 @@ CLAUDE_PRELOAD_OUT="$ATTACK_WORK/rounds/step0_claude_preload.md"
     - < "$CLAUDE_PRELOAD_INPUT" > "$CLAUDE_PRELOAD_OUT" 2>&1) &
 CLAUDE_PID=$!
 
-rm -f "$GPT_R1_INPUT" "$CLAUDE_PRELOAD_INPUT"
-
-# Wait for BOTH to finish
+# Wait for BOTH to finish (do NOT rm input files before wait — subshells need them)
 echo "   ⏳ Waiting for parallel step 0..."
 wait $GPT_PID 2>/dev/null || true
 wait $CLAUDE_PID 2>/dev/null || true
+rm -f "$GPT_R1_INPUT" "$CLAUDE_PRELOAD_INPUT"
 
 # Capture GPT output
 GPT_R1_RESULT=""
