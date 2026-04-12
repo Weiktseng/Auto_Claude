@@ -313,7 +313,7 @@ run_gpt_attacker() {
     (cd "$PROJECT_DIR" && "$CODEX_BIN" exec \
         -s read-only \
         -C "$PROJECT_DIR" \
-        "${model_flag[@]}" \
+        ${model_flag[@]+"${model_flag[@]}"} \
         -o "$last_msg_file" \
         - < "$input_file" > "$out_file" 2>&1) || {
         echo "   ⚠️  codex exec exited non-zero ($?) — continuing with captured output"
@@ -512,7 +512,7 @@ gpt_model_flag=()
 VERIFY2_OUT=$(cd "$PROJECT_DIR" && "$CODEX_BIN" exec \
     -s read-only \
     -C "$PROJECT_DIR" \
-    "${gpt_model_flag[@]}" \
+    ${gpt_model_flag[@]+"${gpt_model_flag[@]}"} \
     -o "$VERIFY2_LAST" \
     - < "$VERIFY_FILE" 2>&1)
 if [[ -s "$VERIFY2_LAST" ]]; then

@@ -65,8 +65,15 @@ echo "   Auto-commit WIP:  $AUTO_COMMIT"
 echo ""
 
 # Run loop.sh in the foreground. Don't exec — we want to run post-hooks when it exits.
+#
+# IMPORTANT: loop.sh's EXIT trap does `kill 0` which sends SIGTERM to the entire
+# process group — including us (the parent). We must ignore TERM while loop.sh runs,
+# otherwise we die before reaching the auto-commit + chain-to-stage3 code below.
+# Ctrl-C (SIGINT) still works for manual abort.
+trap '' TERM
 "$LOOP_SH" "${FORWARD_ARGS[@]}"
 LOOP_EXIT=$?
+trap - TERM  # Restore default TERM handling
 
 echo ""
 echo "🔄 Stage 2 (rev loop) exited with status $LOOP_EXIT"
