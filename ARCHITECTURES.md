@@ -7,7 +7,7 @@ Auto_Claude 同時支援兩種正式架構，根據專案特性擇一使用。�
 | Git tag | `classic-v1` | `pipeline-v1` |
 | 核心腳本 | `engine/loop.sh` | `engine/step1_focus_loop.sh` → `engine/step2_rev_loop.sh` → `engine/attack_loop_v3.sh` |
 | 結構 | 單迴圈 Dev ↔ Reviewer | 三階段 Focus → Review → Attack |
-| 啟動 template | `templates/run.sh` | `templates/run_pipeline.sh` |
+| 模板路徑 | `templates/classic/` | `templates/pipeline/` |
 
 ## 什麼時候用 Classic
 
@@ -42,35 +42,35 @@ Auto_Claude 同時支援兩種正式架構，根據專案特性擇一使用。�
 ## 兩者不共用的東西
 
 **Classic 獨有：**
-- `templates/agent/dev/stage2_prompt.md`（classic 也讀這個，因為 loop.sh 已經改過向後相容：優先找 `stage2_prompt.md`，找不到 fallback 到 `prompt.md`）
+- `templates/classic/agent/dev/prompt.md`（乾淨版 Dev 規則，不含任何 Stage 或 pipeline 相關內容）
 
 **Pipeline 獨有：**
 - `engine/step1_focus_loop.sh` — Stage 1 Dev ↔ dumb Trigger
 - `engine/step2_rev_loop.sh` — Stage 2 wrapper
 - `engine/attack_loop_v3.sh` — Stage 3 GPT fire-and-forget + Claude main（v2、v1 保留作為 fallback）
-- `templates/agent/dev/stage1_prompt.md`
-- `templates/agent/attacker/prompt.md`
-- `templates/agent/phase_plan_template.md`
+- `templates/pipeline/agent/dev/stage1_prompt.md`
+- `templates/pipeline/agent/dev/stage2_prompt.md`（含 Stage 2 心智狀態說明）
+- `templates/pipeline/agent/attacker/prompt.md`
+- `templates/pipeline/agent/phase_plan.md`（未填警示模板）
 
 ## 怎麼切換
 
 **新專案啟動時選架構：**
 
 ```bash
-# Classic
+# Classic — 單迴圈 Dev ↔ Reviewer
 cd /path/to/new_project
 mkdir -p .auto_claude
-cp -r /Users/henry/Desktop/公司/Auto_Claude/templates/* .auto_claude/
-# run.sh 已經是 classic 版本，直接用
+cp -r /Users/henry/Desktop/公司/Auto_Claude/templates/classic/* .auto_claude/
 
-# Pipeline
+# Pipeline — 三階段 Focus → Review → Attack
 cd /path/to/new_project
 mkdir -p .auto_claude
-cp -r /Users/henry/Desktop/公司/Auto_Claude/templates/* .auto_claude/
-cp /Users/henry/Desktop/公司/Auto_Claude/templates/run_pipeline.sh .auto_claude/run.sh
-# 額外要填 phase_plan.md
-cp /Users/henry/Desktop/公司/Auto_Claude/templates/agent/phase_plan_template.md .auto_claude/agent/phase_plan.md
+cp -r /Users/henry/Desktop/公司/Auto_Claude/templates/pipeline/* .auto_claude/
+# phase_plan.md 已經在裡面（模板帶有未填警示，人類必填）
 ```
+
+兩份模板是**完全獨立**的子資料夾，classic 裡不會出現任何 pipeline 的檔案（`stage1_prompt.md`、`attacker/`、`phase_plan.md` 等），反之亦然。複製哪個資料夾就是什麼架構，不會混進去。
 
 **已存在的 classic 專案升級到 pipeline：**
 
