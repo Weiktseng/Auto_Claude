@@ -116,6 +116,46 @@
 
 ---
 
+## Phase 1 硬鎖定檢查（切 phase 時對照此表）
+
+以下類別的需求如果被排到 Phase 2+，代表 phase 邊界畫錯了 — 移回 Phase 1 或重切。
+Phase 2+ 的所有需求必須只 append 新東西（新表 / 新 endpoint / 新頁面），不修改 Phase 1 的 schema 或 API。
+
+| 類別 | 為什麼必須 Phase 1 定 | Phase 2 才改的代價 |
+|---|---|---|
+| **NFR-DEP** 技術棧選型 | 語言、框架、DB、runtime。寫完 3000 行就不能換 | 重寫 |
+| **FR-DAT** 核心 data model | 主表 schema、主鍵、table relation。Phase 2 可以加新表新欄位，但改既有欄位名或 relation 方向要 migrate 全部資料 | Migration 地獄 + 舊 API 全改 |
+| **FR-API** API 契約格式 | URL pattern、error format、pagination schema。前端或第三方一旦開始串接就不能改 | 版本分裂，前後端同時改 |
+| **NFR-SEC** 認證架構 | 認證 pattern（JWT / session）、租戶模型（single / multi）、權限模型（RBAC / ABAC）。不是每條安全規則，是架構級的選擇 | 每支 endpoint 都要加 auth middleware |
+
+### 軟鎖定（Phase 1 最好定，Phase 2 能改但痛苦）
+
+| 類別 | 為什麼建議 Phase 1 | 不做的代價 |
+|---|---|---|
+| **FR-AUTH** 使用者模型 | user 表結構、有沒有 role、單/多租戶 | 後加 multi-tenant 要在所有 query 加 filter |
+| **NFR-DEP** 部署方式 | Docker vs bare metal、port、config 載入方式 | 本機能跑但部署時路徑問題一堆 |
+| **FR-DAT** 檔案儲存策略 | local filesystem vs S3 vs DB blob | Phase 2 搬遷資料 + 改讀取路徑 |
+
+### 不鎖（Phase 2+ 再做沒事）
+
+| 類別 | 為什麼可以後做 |
+|---|---|
+| **FR-UI** 介面美化 / RWD | CSS 隨時改，不影響 backend |
+| **FR-RPT** 報表統計 | 純讀取，data model 正確就能 append |
+| **NFR-PERF** 效能調校 | 先正確再快，index 隨時加 |
+| **FR-INT** 第三方串接 | API 契約穩定的話，串接是 adapter 問題 |
+| **所有 P2** | 定義上就是「沒有不影響交付」 |
+
+### 自檢清單
+
+- [ ] 本 spec 的所有 NFR-DEP-* 都排在 Phase 1
+- [ ] 本 spec 的所有 FR-DAT-*（核心表）都排在 Phase 1
+- [ ] 本 spec 的所有 FR-API-*（契約格式）都排在 Phase 1
+- [ ] 本 spec 的所有 NFR-SEC-*（認證架構）都排在 Phase 1
+- [ ] Phase 2+ 沒有任何需求需要「修改」Phase 1 的 schema 或 API（只能 append）
+
+---
+
 > **填完後刪除所有 `<...>` 佔位符和引言區塊（含本段）。**
 > 殘留 `<...>` 代表 spec 沒寫完，Dev 會在那些地方自己做判斷——結果通常是錯的。
 >
