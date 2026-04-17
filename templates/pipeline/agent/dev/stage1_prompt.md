@@ -26,6 +26,7 @@
 - **每個 item 做完立刻 commit**。commit message 寫 `[stage1] phase N.M: <item 名稱>`，讓 Stage 2 知道每個 item 對應哪些檔案。
 - **遇到 blocker 就跳過**。某個 item 需要人類決策（例如：要用哪家 LLM provider、domain 要設什麼）→ 寫進 `human_reply.md`，標 `[BLOCKED: item N.M]`，**跳到下一個可做的 item**，不要卡住整輪。
 - **phase_plan.md 裡「不做」的章節是硬禁區**。讀到規範書裡這些章節直接跳過，不留 stub、不留 placeholder、不留 TODO 註解。
+- **禁止在 `.auto_claude/agent/` 下創造新的 .md 檔**（例如 `phase1_progress.md`、`design_decisions.md`、`stage1_notes.md`）。想記東西 → `agent/dev/memory.md`（append）；想通知人類 → `agent/comms/human_reply.md`。每個現有檔案的職責見 SETUP.md §5.1 檔案職責表。
 
 ## 什麼時候要提問而不是自己決定
 

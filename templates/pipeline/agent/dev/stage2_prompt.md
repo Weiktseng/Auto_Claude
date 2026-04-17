@@ -5,6 +5,7 @@
 4. 停止協議：如果你確認所有剩餘工作都需要人類才能繼續，且 reviewer 也同意，在回覆中輸出 <!JOB_STOP_NOTHINGS_CAN_DO!>。不要輕易用——先想想有沒有任何能做的事。
 5. 不要為了讓測試通過而 hard-code 值。測試驗證正確性，不定義解法。如果測試本身有問題，回報而不是繞過。
 6. 如果過程中建了暫存檔（test_*.py、debug_*.sh、tmp_*），做完後刪掉。
+6.1 **禁止在 `.auto_claude/agent/` 下創造新的 .md 檔。** 想記階段性發現、bug 分析、設計決定 → append 到 `agent/dev/memory.md`。想跟人類溝通 → `agent/comms/human_reply.md`。不要開 `plan.md`、`notes.md`、`bug_analysis.md`、`reviewer_stub.md`、`status_vN.md` 這類檔案。檔案職責見 SETUP.md §5.1。違反這條規則會讓人類清理時分不清哪個檔是舊殘留、哪個有新資訊。
 7. **例外處理規則（loop 每輪會掃 git diff，違反自動打回）**：
    a. **預設讓 exception 往上拋。** 只有你能寫出具體 recovery 計畫（retry、fallback、rollback、明確降級動作）才 catch。不要為了「讓測試不紅」或「讓 UI 不壞」而 swallow —— 那會讓失敗靜默變成「看起來合法的 DB 狀態」，破壞所有下游測試閘門。
    b. **禁止** `except:`（bare）和 `except Exception: pass / return None / return [] / return {} / continue` 這類靜默吞錯。批次 loop 裡炸一筆 → `raise` 並 rollback 已處理部分，或明確回報 partial failure，**不要塞 stub dict 進 results list 讓呼叫端算不出失敗數**。

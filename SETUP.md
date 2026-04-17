@@ -119,24 +119,92 @@ pip install treesitter-mcp==2.1
 
 ## 5. 建立新專案
 
+**先選架構**（詳見 [ARCHITECTURES.md](ARCHITECTURES.md)）：
+
+- **Classic** — 單迴圈 Dev ↔ Reviewer。已存在專案補 feature / 短 spec / 修 bug 用這個。
+- **Pipeline** — 三階段 Focus → Review → Attack。從零開始、長 spec、要無人值守一整晚用這個。
+
+兩套模板在 `templates/classic/` 和 `templates/pipeline/` 各自獨立，複製哪個就是什麼架構，**不會混在一起**。
+
+### Classic 建立流程
+
 ```bash
-# 在你的專案目錄下
+cd /path/to/your-project
 mkdir -p .auto_claude
-cp -r <Auto_Claude>/templates/* .auto_claude/
+cp -r <Auto_Claude>/templates/classic/* .auto_claude/
 
 # 編輯設定
 vim .auto_claude/agent/spec.txt          # 貼上你的規格書
-vim .auto_claude/agent/context.md        # 填專案背景 + Phase 切分（見 5.5）
+vim .auto_claude/agent/context.md        # 填專案背景、技術棧、git 規則（見 §5.5）
 vim .auto_claude/agent/reviewer/prompt.md  # 自訂 reviewer 角色
 
-# 修改 run.sh 裡的路徑
+# 修改 run.sh 裡的 ENGINE_REPO 路徑
 vim .auto_claude/run.sh
 
 # 啟動
 .auto_claude/run.sh --initial-prompt "開始做登入功能" --max-rounds 20
 ```
 
+### Pipeline 建立流程
+
+```bash
+cd /path/to/your-project
+mkdir -p .auto_claude
+cp -r <Auto_Claude>/templates/pipeline/* .auto_claude/
+
+# 編輯設定
+vim .auto_claude/agent/spec.txt          # 貼上你的規格書
+vim .auto_claude/agent/context.md        # 專案背景
+vim .auto_claude/agent/phase_plan.md     # 必填，模板會拒絕在未填時啟動（見 §5.5）
+vim .auto_claude/run.sh                  # ENGINE_REPO 路徑
+
+# 啟動（預設跑完整三段，結束等人類驗收）
+.auto_claude/run.sh
+```
+
+## 5.1 檔案職責表（每個檔案幹嘛，誰寫誰讀 — Dev / Reviewer 必遵）
+
+`.auto_claude/agent/` 下**只允許這些檔案存在**。Dev 和 Reviewer **禁止自己創造新的 .md 檔**（例如 `reviewer_stub.md`、`dev_notes.md`、`plan_v2.md` 這類）— 想記東西就寫到「你的 memory」那欄的對應檔案，不要開新檔。
+
+### Classic 專用
+
+| 檔案 | 功能 | 人類寫 | Dev 寫 | Reviewer 寫 | 引擎寫 |
+|---|---|:-:|:-:|:-:|:-:|
+| `spec.txt` | **需求**：產品要做什麼（客戶/PM 的契約原文） | ✅ 一次性 | ❌ | ❌ | ❌ |
+| `context.md` | **環境**：技術棧、git 規則、API keys、禁做範圍 | ✅ 一次性 | ❌ | ❌ | ❌ |
+| `dev/prompt.md` | **Dev 角色規則**：怎麼工作、何時停、exception 規則 | ✅ 一次性 | ❌ | ❌ | ❌ |
+| `dev/memory.md` | **Dev 自己的筆記**（跨輪累積，只有 Dev 看） | ❌ | ✅ append | ❌ | ❌ |
+| `reviewer/prompt.md` | **Reviewer 角色規則** | ✅ 一次性 | ❌ | ❌ | ❌ |
+| `reviewer/memory.md` | **Reviewer 審查歷史**（Curator 會自動壓縮） | ❌ | ❌ | ❌ | ✅ 每輪自動 |
+| `curator/prompt.md` | **Curator 壓縮規則** | ✅ 一次性 | ❌ | ❌ | ❌ |
+| `dev/progress.md` | **Curator 壓縮的進度摘要**（session 重啟時載入） | ❌ | ❌ | ❌ | ✅ 每 8 輪自動 |
+| `comms/human_message.md` | **人類 → AI** 單向通道（下一輪生效） | ✅ 隨時 | ❌ | 讀 | ✅ 自動清 |
+| `comms/human_reply.md` | **AI → 人類** 單向通道 | ❌ | ✅ | 讀 | ❌ |
+| `comms/human_message_history.log` | 人類插話歷史歸檔 | ❌ | ❌ | ❌ | ✅ |
+| `comms/todo.md` | Dev + Reviewer 共用任務清單（選用） | ✅ 可寫 | ✅ | ✅ | ❌ |
+
+### Pipeline 額外的
+
+| 檔案 | 功能 | 人類寫 | Dev 寫 | Reviewer 寫 | 引擎寫 |
+|---|---|:-:|:-:|:-:|:-:|
+| `phase_plan.md` | **Phase 計畫**：每 phase 的 items + 驗收指令 | ✅ 一次性（必填） | ✅ 勾選完成 `[x]` | 讀 | ❌ |
+| `dev/stage1_prompt.md` | **Stage 1 Dev 規則**（Focus 模式） | ✅ 一次性 | ❌ | ❌ | ❌ |
+| `dev/stage2_prompt.md` | **Stage 2 Dev 規則**（Review/Fix 模式） | ✅ 一次性 | ❌ | ❌ | ❌ |
+| `attacker/prompt.md` | **Attacker 角色規則**（Stage 3 GPT + Claude 讀） | ✅ 一次性 | ❌ | ❌ | ❌ |
+
+### 如果 AI 想寫「不屬於上面任何一項」的東西
+
+**階段性報告、bug 分析、決策紀錄、設計筆記 → 全部寫進 `dev/memory.md`**（自己的筆記）。不要開新 .md 檔。
+
+**想跟人類溝通的 → `comms/human_reply.md`**（不是 `questions.md`、不是 `blockers.md`、不是 `status.md`）。
+
+**Reviewer 想記錄審查觀察 → `reviewer/memory.md`**（引擎會自動追加，Reviewer 自己不要手動改）。
+
+**違反這個規則的代價**：下次 loop 啟動時，Dev 會看到奇怪的 `plan_v2.md` / `reviewer_stub.md` / `bug_analysis_draft.md`，不知道該讀哪個、也不知道哪個是舊的殘留。人類來清理時要逐個判斷是廢檔還是重要資訊。**一句話：功能歸檔，不要開新檔。**
+
 ## 5.5 Spec Phase 切分分析（長 spec 必做，30 分鐘人類工作）
+
+> Pipeline 架構會強制這一步（沒填 `phase_plan.md` Stage 1 會拒絕啟動）。Classic 架構不強制，但長 spec 建議在 `context.md` 裡做同樣的 phase 邊界宣告。
 
 **拿到 >1000 行的外部規格書時，不要直接丟給 Dev 開始做。** 先做 Phase 切分。
 
