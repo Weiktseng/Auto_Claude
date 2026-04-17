@@ -1,0 +1,9 @@
+# 執行時產生的資料，不應提交
+workspace/
+logs/
+agent/comms/human_message_history.log
+agent/dev/memory.md
+agent/dev/progress.md
+agent/reviewer/memory.md
+.env
+*.log

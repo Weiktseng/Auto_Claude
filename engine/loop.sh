@@ -314,6 +314,13 @@ run_curator() {
     local dev_output="$1"
     local round_num="$2"
 
+    # DUMB_REVIEWER mode: skip curator Claude call, just reset dev session
+    if [[ "${DUMB_REVIEWER:-0}" == "1" ]]; then
+        echo "🧹 Curator skipped (DUMB_REVIEWER=1), keeping dev session" >&2
+        echo "（DUMB 模式略過 curator，保留 dev session 上下文）"
+        return 0
+    fi
+
     echo "🧹 Curator (sonnet) compressing context..."
 
     local curator_input="以下是開發者第 $round_num 輪結束時的累積輸出。請壓縮 tool call 輸出，保留關鍵內容本身。
@@ -352,6 +359,8 @@ PROGRESS_EOF
 REVIEWER_MEMORY_SUMMARIZER_INTERVAL=12  # 每 N 輪壓縮一次
 
 summarize_reviewer_memory() {
+    # DUMB_REVIEWER mode: memory is all boilerplate, no summarize needed
+    if [[ "${DUMB_REVIEWER:-0}" == "1" ]]; then return; fi
     local mem_file="${AGENT_DIR:-$COMMS_DIR}/reviewer/memory.md"
     if [[ ! -f "$mem_file" ]]; then return; fi
 
@@ -442,6 +451,25 @@ $mem_content"
 # ── Helper: run reviewer ──
 run_reviewer() {
     local dev_output="$1"
+
+    # ── DUMB_REVIEWER mode: no Claude call, return fixed continuation prompt ──
+    # 用在工具鏈任務（例如字典擴充）— AI reviewer 無加值且浪費 API quota
+    if [[ "${DUMB_REVIEWER:-0}" == "1" ]]; then
+        # 檔案放在 agent/ 根部（reviewer_stub.md）而不是 reviewer/，避免跟
+        # reviewer/prompt.md 混淆。舊路徑 reviewer/dumb_response.md 保留 fallback。
+        local dumb_file=""
+        if [[ -f "${AGENT_DIR:-}/reviewer_stub.md" ]]; then
+            dumb_file="${AGENT_DIR}/reviewer_stub.md"
+        elif [[ -f "${AGENT_DIR:-}/reviewer/dumb_response.md" ]]; then
+            dumb_file="${AGENT_DIR}/reviewer/dumb_response.md"
+        fi
+        if [[ -n "$dumb_file" ]]; then
+            cat "$dumb_file"
+        else
+            printf '%s\n' '繼續下一輪。記得每輪結束 git commit。遵守 spec.txt 的安全紅線。'
+        fi
+        return 0
+    fi
 
     local prompt_file
     prompt_file=$(mktemp /tmp/reviewer_prompt_XXXXXX)
@@ -655,10 +683,18 @@ build_dev_prompt() {
     local _prompt_file
     _prompt_file=$(mktemp /tmp/dev_prompt_XXXXXX)
 
-    # Load dev prompt rules
+    # Load dev prompt rules — prefer stage2_prompt.md (new), fall back to prompt.md (legacy)
     local _dev_prompt_content=""
-    if [[ -n "$AGENT_DIR" && -f "$AGENT_DIR/dev/prompt.md" ]]; then
-        _dev_prompt_content=$(cat "$AGENT_DIR/dev/prompt.md")
+    local _dev_prompt_file=""
+    if [[ -n "$AGENT_DIR" ]]; then
+        if [[ -f "$AGENT_DIR/dev/stage2_prompt.md" ]]; then
+            _dev_prompt_file="$AGENT_DIR/dev/stage2_prompt.md"
+        elif [[ -f "$AGENT_DIR/dev/prompt.md" ]]; then
+            _dev_prompt_file="$AGENT_DIR/dev/prompt.md"
+        fi
+    fi
+    if [[ -n "$_dev_prompt_file" ]]; then
+        _dev_prompt_content=$(cat "$_dev_prompt_file")
     else
         _dev_prompt_content='規則：
 1. 直接動手做事，不要問問題。你是 RD，寫程式是你的工作。
@@ -1012,7 +1048,8 @@ EOF
     fi
 
     # ── Step D-1: Curator — every N rounds, compress context and start fresh session ──
-    if [[ $((round % CURATOR_INTERVAL)) -eq 0 && $round -lt $MAX_ROUNDS ]]; then
+    # DUMB_REVIEWER=1: skip the whole curator + session reset block
+    if [[ "${DUMB_REVIEWER:-0}" != "1" ]] && [[ $((round % CURATOR_INTERVAL)) -eq 0 && $round -lt $MAX_ROUNDS ]]; then
         echo "🧹 Round $round: Curator triggered (every ${CURATOR_INTERVAL} rounds)"
 
         CURATOR_START=$(date +%s)

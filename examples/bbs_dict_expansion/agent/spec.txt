@@ -1,0 +1,103 @@
+# 字典擴充任務（terminology_public.json）
+
+> 本檔是**任務規格單一來源**（WHAT to do）。環境/工具路徑看 `context.md`；Dev 通用行為看 `dev/prompt.md`。
+
+## 目標
+從公開中文會議音檔餵 ASR，擴充 `meeting_summarizerV9/config/terminology_public.json`。baseline 78 條（commit `6306252`）。沒有硬性 KPI，**品質 > 數量**，跑通工具鏈比條數重要。
+
+## 每輪工作流
+1. 選公開中文音檔 URL（YouTube / Bilibili / 政府影音 / podcast）。若 `source_yield.json` 有統計，挑 ratio 高的類型；先 `yt-dlp --get-duration --get-title` 確認內容不跑題
+2. 跑 ASR（一行）：
+   ```bash
+   KEY_OUT=$(.auto_claude/tools/asr_via_docker.sh --url "<URL>" --round $ROUND --duration 600 --start 300)
+   KEY="${KEY_OUT#KEY=}"
+   TRANSCRIPT=".auto_claude/workspace/transcripts/${KEY}.txt"
+   ```
+   退出碼處理、script 底層原理：看 `context.md`
+3. 讀 `$TRANSCRIPT`，依「納入判斷」挑候選，過濾後 append 到 `terminology_public.json`
+4. `python -m json.tool < .../terminology_public.json > /dev/null` + pytest（pytest 指令在 `context.md`）
+5. 寫 `workspace/candidates/round_N.json`（schema 見下）
+6. 更新 `workspace/source_yield.json`
+7. `git add meeting_summarizerV9/config/terminology_public.json .auto_claude/workspace/ && git commit -m "round N: +X entries (<short-topic>)"`
+
+**破測試 / JSON 壞** → `git checkout meeting_summarizerV9/config/terminology_public.json` 回上輪，記一條到 `workspace/failures.md`。
+
+## 納入 entry 判斷
+
+**加：**
+- 多家公司、多場合會講到的通用字（政府機關、醫院、大學、上市公司、商務術語、地名）
+- ASR 有典型誤聽（字形近或音近）
+- `correct` 不是高頻通用字母（避免 `IP: RFP` 這種會誤傷）
+- `wrong` 不是合法書面詞（`展演→展延` 不加，因 `展演` 是真詞；`桃圓→桃園` OK，`桃圓` 不會在正常文本出現）
+- 字典裡尚未有的新 entry
+
+**不加：**
+- 任何人名
+- 客戶特定子公司、部門縮寫、產品名、專案名
+- 非商務主題字（股票八卦、娛樂、閒聊）
+
+不確定 → 跳過（false positive 比 false negative 嚴重）。
+
+## Candidates 檔 schema（`workspace/candidates/round_N.json`）
+
+```json
+{
+  "round": 5,
+  "source_url": "https://www.youtube.com/watch?v=xxxx",
+  "source_type": "govt_briefing",
+  "key": "bbs_dict_r5_1744875432",
+  "transcript_file": ".auto_claude/workspace/transcripts/bbs_dict_r5_1744875432.txt",
+  "candidates": [
+    {
+      "wrong": "自動安全",
+      "correct": "資通安全",
+      "category": "common_terms",
+      "evidence": "round2b.txt: '推動國家自動安全管理方案'、'輔導自動安全的人才培訓'、'推動自動安全法'（共8次出現）。資通=ICT，資通安全=資訊通信安全，台灣官方術語。資通(zītōng)→自動(zìdòng)音近。",
+      "accepted": true,
+      "reason": "高頻出現，phonetically 資通/自動 極近，資通安全法為台灣官方名稱"
+    }
+  ],
+  "accepted_count": 3,
+  "rejected_count": 2,
+  "pytest_pass": true
+}
+```
+
+**欄位說明：**
+- `evidence`：逐字稿原句 + 出現次數 + 語源/音變分析。主管要詳細，不是「L42: 某句」一行交差
+- `accepted`：true / false。rejected 的也留在 candidates 裡（audit trail），只是不合進字典
+- `reason`：為何 accept/reject 的判斷依據
+- `category`：`common_companies` / `locations` / `common_terms` / `universities` / `government_agencies` / `hospitals`
+
+## 安全紅線（違反本輪作廢）
+1. **絕對不讀、不改 `terminology_private.json`**
+2. 不改 `meeting_summarizerV9/config/` 底下其他檔
+3. 不改 `meeting_summarizerV9/code/`、`tools/`、`speaker_diarization/`
+4. **不改 MeetLingo 任何檔案**（`/home/sam/MeetLingo/`）；只能 `docker exec` / `docker cp`，做完清乾淨
+5. **不 `docker start/stop/restart/kill` 任何 meetlingo-* 容器**（產線服務）
+6. 不 `git push`
+7. 不 print / commit API key / token（MeetLingo env 裡有 OpenAI key、HF token）
+
+## 停止
+**只靠 `max-rounds`**（啟動時指定）。Dev 不要自宣「做完了」——這個專案沒有停工協議。
+
+某輪真的沒進度（素材荒、ASR 全失敗、翻完字典沒新錯字）：
+- 寫一條到 `workspace/failures.md`（日期、原因、嘗試過什麼）
+- 本輪不 commit
+- loop 自然進下一輪
+
+寧可空跑一輪、上一輪成果是否有價值留給人類覆盤時判斷，也不要擅自終止。
+
+## 自適應採集
+每輪更新 `.auto_claude/workspace/source_yield.json`：
+```json
+{
+  "govt_bid_briefing":  {"attempts": N, "entries_accepted": K},
+  "industry_forum":     {"attempts": N, "entries_accepted": K},
+  "corp_earnings":      {"attempts": N, "entries_accepted": K},
+  "govt_briefing":      {"attempts": N, "entries_accepted": K},
+  "medical_meeting":    {"attempts": N, "entries_accepted": K},
+  "other":              {"attempts": N, "entries_accepted": K}
+}
+```
+下一輪挑 `entries_accepted / max(attempts, 1)` 最高的類型。某類連續 3 輪 0 產出就暫停該類型。
