@@ -1,18 +1,40 @@
-# Project-specific data (lives in each project's .auto_claude/)
+# ── Project-specific data ────────────────────────────────────────────
+# 每個專案的東西住在該專案的 .auto_claude/ 下，不屬於這個引擎 repo。
 projects/
 
-# Personal / secret files
-agent/human_context.md
-agent/logs/
-agent/spec_raw.txt
-agent/spec_dev.txt
-agent/questions_for_human.md
+# 客戶專案素材 — 這個 repo 必須保持乾淨、可單獨上 GitHub
+motc_prompt/
+references/犬貓檢疫系統製作提示語all.md
 
-# Engine runtime logs
-engine/logs/
+# ── Personal / secret files ──────────────────────────────────────────
+# 用檔名比對，不用路徑綁定：搬到任何目錄都照樣擋。
+# 2026-08-02 修：原本寫成 `agent/spec_raw.txt` 這種路徑綁定，這些檔搬到
+# `_legacy/` 之後保護就失效了，差一次 `git add -A` 就會外洩。
+**/human_context*.md
+**/spec_raw.txt
+**/spec_dev.txt
+**/questions_for_human.md
 
-# Claude Code local settings
+# 例外：範本不是機密
+!_legacy/prompts/human_context.example.md
+
+# ── Runtime logs ─────────────────────────────────────────────────────
+**/logs/
+
+# ── 舊版引擎 ─────────────────────────────────────────────────────────
+# 已進版控的舊檔繼續留著（gitignore 不影響已追蹤檔），
+# 這條只擋之後新掉進 _legacy/ 的東西。
+_legacy/
+
+# ── Build / cache ────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+
+# ── Local tooling config ─────────────────────────────────────────────
 .claude/
+.mcp.json
+.test_prompt/
 
-# OS
+# ── OS ───────────────────────────────────────────────────────────────
 .DS_Store

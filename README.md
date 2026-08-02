@@ -58,7 +58,9 @@ claude login  # OAuth 登入
 ```bash
 cd /path/to/your-project
 mkdir -p .auto_claude
-cp -r /path/to/Auto_Claude/templates/* .auto_claude/
+# 選一套架構複製（兩套獨立，不要都複製）：
+cp -r /path/to/Auto_Claude/templates/classic/*  .auto_claude/   # Dev ↔ Reviewer 單迴圈
+# cp -r /path/to/Auto_Claude/templates/pipeline/* .auto_claude/ # Stage 1→2→3 三段式
 
 # 編輯三個關鍵檔案：
 vim .auto_claude/agent/spec.txt            # 規格書（AI 的需求來源）
@@ -190,6 +192,23 @@ kill $(cat .auto_claude/logs/heartbeat | python3 -c "import sys,json;print(json.
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 系統架構、Prompt 組裝、三層抓 bug 機制 |
 | [GUIDE.md](GUIDE.md) | 權限 5 層架構教學 |
 | [KNOWN_PITFALLS.md](KNOWN_PITFALLS.md) | 已知坑和解法 |
+
+## 能力邊界
+
+Auto_Claude 架構上不限制只能做 dev loop。通用 autonomous AI agent（例如 OpenClaw）的核心能力，Auto_Claude 都能提供：
+
+| 能力 | Auto_Claude 對應實現 |
+|---|---|
+| 本機執行、零雲端依賴 | bash loop 本機跑 |
+| 長期記憶 | `agent/reviewer/memory.md`（Reviewer 跨輪）+ `agent/dev/progress.md`（Curator 每 8 輪壓縮）+ Dev session `--resume` + `agent/dev/memory.md` 四層 |
+| Self-improving | Dev 有全工具權限，每輪可自由新增專案內的工具腳本 / helper 檔案 |
+| Proactive 自主推進 | loop 每輪主動推進不等人類（這正是 `loop.sh` 的全部工作） |
+| 任意介面接入 | 核心介面 `bash loop.sh --initial-prompt "..."`；要接 messaging（Signal/Telegram/Discord）、webhook、chatbot、cron 都是 adapter 層問題——寫個薄殼呼叫 loop，或把訊息寫進 `agent/comms/human_message.md` 即可 |
+| LLM 替換 | 預設 `claude --print` 吃 Claude Max plan（推薦）；`run_dev` 呼叫層替換後可接其他 CLI-based LLM |
+
+**但大多數通用助理場景根本不需要 loop**：一顆設定好的 Claude CLI + 一個好的 `settings.local.json` 就能把「幫我查資料 / 整理筆記 / 跑一次性腳本 / 操作雲端服務」這類任務做得很好，一次搞定。Auto_Claude 的多輪架構是**專門為單輪 CLI 做不到的事**準備的——那種跑 8 小時、會自我退化、會把 bug 藏起來、需要外部視角反覆審查的長程 dev 任務。
+
+換句話說：loop 的複雜度只該在需要它的地方出現。通用任務用 Claude CLI 一次性搞定就好，不需要也不應該套上多輪架構。
 
 ---
 
