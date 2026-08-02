@@ -172,7 +172,8 @@ vim .auto_claude/run.sh                  # ENGINE_REPO 路徑
 |---|---|:-:|:-:|:-:|:-:|
 | `spec.txt` | **需求**：產品要做什麼（客戶/PM 的契約原文） | ✅ 一次性 | ❌ | ❌ | ❌ |
 | `context.md` | **環境**：技術棧、git 規則、API keys、禁做範圍 | ✅ 一次性 | ❌ | ❌ | ❌ |
-| `dev/prompt.md` | **Dev 角色規則**：怎麼工作、何時停、exception 規則 | ✅ 一次性 | ❌ | ❌ | ❌ |
+| `dev/common_rules.md` | **Dev 共通規則**（所有模式共用：通道、exception、測試品質、派 subagent）。引擎自動接在模式 prompt 前面 | ✅ 一次性 | ❌ | ❌ | ❌ |
+| `dev/prompt.md` | **Dev 模式專屬規則**（Classic 專用；共通的部分在 `common_rules.md`） | ✅ 一次性 | ❌ | ❌ | ❌ |
 | `dev/memory.md` | **Dev 自己的筆記**（跨輪累積，只有 Dev 看） | ❌ | ✅ append | ❌ | ❌ |
 | `reviewer/prompt.md` | **Reviewer 角色規則** | ✅ 一次性 | ❌ | ❌ | ❌ |
 | `reviewer/memory.md` | **Reviewer 審查歷史**（Curator 會自動壓縮） | ❌ | ❌ | ❌ | ✅ 每輪自動 |

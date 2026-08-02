@@ -132,6 +132,26 @@ else
 fi
 STAGE1_PROMPT=$(cat "$STAGE1_PROMPT_FILE")
 
+# ── Shared dev rules (optional) ──
+# common_rules.md holds the discipline shared by every mode; the stage prompt holds
+# only what's specific to this stage. Prepended when present. Absent is FINE — older
+# projects still carry the full rule list inline in their stage prompt, so skipping
+# here leaves them working exactly as before.
+COMMON_RULES_FILE=""
+if [[ -f "$AGENT_DIR/dev/common_rules.md" ]]; then
+    COMMON_RULES_FILE="$AGENT_DIR/dev/common_rules.md"
+elif [[ -f "$SCRIPT_DIR/../templates/pipeline/agent/dev/common_rules.md" ]]; then
+    COMMON_RULES_FILE="$SCRIPT_DIR/../templates/pipeline/agent/dev/common_rules.md"
+fi
+if [[ -n "$COMMON_RULES_FILE" ]]; then
+    STAGE1_PROMPT="$(cat "$COMMON_RULES_FILE")
+
+---
+
+$STAGE1_PROMPT"
+    echo "   Common rules: $COMMON_RULES_FILE"
+fi
+
 PHASE_PLAN_CONTENT=$(cat "$PHASE_PLAN_PATH")
 
 CONTEXT_PATH="$AGENT_DIR/context.md"
@@ -269,6 +289,17 @@ DEVPROMPT
             printf '路徑：%s，append 到檔尾。只注入最後 80 行。\n\n' "$_dev_mem_file" >> "$prompt_file"
             tail -80 "$_dev_mem_file" >> "$prompt_file"
         fi
+    fi
+
+    # ── Except-hook findings (post-dev anti-pattern scan; copied from loop.sh) ──
+    local _except_file="$LOG_DIR/except_violations_latest.txt"
+    if [[ -s "$_except_file" ]]; then
+        printf '\n\n---\n# ⚠️ 上一輪你新增的 except 區塊違反規則（loop hook 自動掃描）\n' >> "$prompt_file"
+        printf '這些 pattern 會讓失敗靜默降級成「看起來 OK 的 DB 狀態」，defeat 所有測試閘門。\n' >> "$prompt_file"
+        printf '請本輪先修完下列項目再繼續新工作：\n\n' >> "$prompt_file"
+        cat "$_except_file" >> "$prompt_file"
+        printf '\n' >> "$prompt_file"
+        rm -f "$_except_file"
     fi
 
     # Human hotline (same mechanism as loop.sh)
@@ -425,6 +456,9 @@ TRIG
         DEV_MESSAGE=$(build_dev_prompt "$TRIGGER_TEXT")
     fi
 
+    # Snapshot HEAD so the post-dev except scan only looks at this round's diff
+    _round_start_sha=$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo "")
+
     DEV_START=$(date +%s)
     DEV_OUTPUT=$(run_dev "$DEV_MESSAGE")
     DEV_END=$(date +%s)
@@ -448,6 +482,21 @@ TRIG
     echo ""
     echo "$DEV_OUTPUT"
     echo ""
+
+    # ── Post-Dev hook: scan for exception anti-patterns in this round's diff ──
+    # Stage 1 is the only stage with no Reviewer, so this hook is the ONLY quality
+    # gate here. It was missing until 2026-07-31 — same class of omission as
+    # KNOWN_PITFALLS.md #12 (new loop copied loop.sh but dropped a guard).
+    _except_violations="$LOG_DIR/except_violations_latest.txt"
+    if [[ -x "$SCRIPT_DIR/check_except_patterns.py" ]]; then
+        if python3 "$SCRIPT_DIR/check_except_patterns.py" \
+                "$PROJECT_DIR" --since "$_round_start_sha" > "$_except_violations" 2>&1; then
+            rm -f "$_except_violations"
+        else
+            _viol_count=$(grep -c '\[silent_swallow\]\|\[bare_except\]' "$_except_violations" 2>/dev/null || echo 0)
+            echo "⚠️  except-hook: $_viol_count anti-pattern(s) flagged — will inject into next Dev prompt"
+        fi
+    fi
 
     cat >> "$STAGE1_LOG" <<EOF
 ## Round $round — $(date +"%H:%M:%S") — Dev (${DEV_CHARS} chars, ${DEV_DURATION}s)

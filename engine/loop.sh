@@ -667,6 +667,16 @@ build_dev_prompt() {
     fi
     if [[ -n "$_dev_prompt_file" ]]; then
         _dev_prompt_content=$(cat "$_dev_prompt_file")
+        # Shared dev rules — prepended when present. Absent is FINE: older projects
+        # still carry the full rule list inline in dev/prompt.md, so skipping here
+        # leaves them working exactly as before.
+        if [[ -n "$AGENT_DIR" && -f "$AGENT_DIR/dev/common_rules.md" ]]; then
+            _dev_prompt_content="$(cat "$AGENT_DIR/dev/common_rules.md")
+
+---
+
+$_dev_prompt_content"
+        fi
     else
         _dev_prompt_content='規則：
 1. 直接動手做事，不要問問題。你是 RD，寫程式是你的工作。

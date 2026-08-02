@@ -158,6 +158,43 @@
 
 ---
 
+## 12. attack_loop / 新腳本沒有 rate limit 重試，產出空報告
+
+**現象**：`attack_loop_v3.sh` 跑完，log 裡三個 step 都寫 `"You've hit your org's monthly usage limit"`。Final report 是空的。腳本 exit 0，看起來「成功」。
+
+**原因**：`attack_loop_v3.sh` 的 Claude 呼叫只有 `|| true`，rate limit 錯誤訊息被直接寫進 `$claude_out`，腳本繼續跑，把錯誤訊息當作分析結果。**沒有 pattern 偵測、沒有等待、沒有重試**。
+
+而 `loop.sh` 有完整的 `wait_for_rate_limit()` + `while true` retry，`attack_loop_v3.sh` 建立時漏了移植。
+
+**Claude 的錯誤**：新增 `attack_loop_v3.sh` 時複製了 `loop.sh` 的結構，但漏掉 rate limit 處理。以為 `|| true` 夠了，其實它只是讓腳本不 crash，不會處理錯誤內容。
+
+**正確做法**：每個腳本的 Claude 呼叫都必須包在 `while true` retry 迴圈裡，偵測到 `RATE_LIMIT_PATTERN` 就呼叫 `wait_for_rate_limit()`。
+
+**建構新 loop 時的 checklist**：
+```
+□ 定義 RATE_LIMIT_PATTERN（複製 loop.sh 的版本，已含 "monthly usage"）
+□ 定義 wait_for_rate_limit() 函數（解析 resets Xam，精確 sleep）
+□ 每個 Claude / GPT 呼叫 → while true 包起來 → pattern check → break or wait
+□ 不能只有 || true，那只防 crash，不防靜默空報告
+□ 清點 loop.sh 目前所有的品質閘門，逐個確認有沒有移植（見 #13）
+```
+
+---
+
+## 13. 新 loop 漏抄品質閘門（#12 的同款重演）
+
+**現象**：`step1_focus_loop.sh` 從 loop.sh 抄了 rate limit helper（註解寫 "copied from loop.sh"）和 Curator，但**漏抄 `check_except_patterns.py` 的掃描 + 注入**。
+
+**後果比 #12 更隱蔽**：Stage 1 是**唯一沒有 Reviewer 的階段**（另一端是 dumb bot），這個 hook 是它唯一的品質閘門。漏掉 = Stage 1 全程無守門，而它正是產出最多 code 的階段。更糟的是 `stage1_prompt.md` 明文寫「規則 7 在 Stage 1 也適用」，Dev 讀到「會被掃描」，實際不會 —— **規則存在但沒有執法者，比沒有規則更危險**，因為人類看 prompt 會以為守住了。
+
+**Claude 的錯誤**：抄一個腳本時，只抄「看得見的功能」（rate limit、Curator 有明顯的區塊註解），漏掉「散落的 hook」（except 掃描在 dev 呼叫後，注入在 build_dev_prompt 裡，分兩處且用 local 變數，grep 一次找不齊）。
+
+**修復**（2026-07-31）：`step1_focus_loop.sh` 補上三處 —— `_round_start_sha` 快照（:440）、post-dev 掃描（:470）、`build_dev_prompt` 裡的注入（:275）。
+
+**通則**：**閘門是分散的，功能是集中的。** 抄腳本時要 grep 的不是「有哪些函數」，是「有哪些地方會擋 Dev」。列出來逐個核對，不要靠讀一遍的印象。
+
+---
+
 ## 模式總結：Claude 容易犯的系統性錯誤
 
 | 模式 | 例子 | 對策 |
@@ -169,3 +206,4 @@
 | **塞爆 prompt** | 任務清單、完整 spec | 分離靜態 vs 動態，按需注入 |
 | **不知道自己在退化** | context rot | 外部機制強制重置（curator），不靠 AI 自我判斷 |
 | **過度信任自動評估** | LLM-as-Judge | 精確內容用程式化檢查，不用 LLM 判斷 |
+| **`\|\| true` 當成錯誤處理** | rate limit 靜默空報告 | 每個 Claude 呼叫要 while true + pattern check，`\|\| true` 只防 crash |
